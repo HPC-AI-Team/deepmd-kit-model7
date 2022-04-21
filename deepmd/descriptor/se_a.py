@@ -16,6 +16,7 @@ from deepmd.utils.type_embed import embed_atom_type
 from deepmd.utils.sess import run_sess
 from deepmd.utils.graph import load_graph_def, get_tensor_by_name_from_graph, get_embedding_net_variables
 from .descriptor import Descriptor
+from IPython import embed
 
 
 class DescrptSeA(Descriptor):
@@ -460,6 +461,7 @@ class DescrptSeA(Descriptor):
         atype = tf.reshape(atype_, [-1, natoms[1]])
         u_atype = tf.reshape(self.place_holders['fake_type'], [-1, natoms[1]])
         # out todo
+        self.attn_weight_nos = [None for i in range(self.attn_layer)]
         self.attn_weight = [None for i in range(self.attn_layer)]
         self.angular_weight = [None for i in range(self.attn_layer)]
         self.attn_weight_final = [None for i in range(self.attn_layer)]
@@ -823,7 +825,7 @@ class DescrptSeA(Descriptor):
         type_out = one_layer(
             type_embedding,
             out_dim,
-            name='type_net',
+            name='type_net_nei',
             reuse=tf.AUTO_REUSE,
             seed=self.seed,
             activation_fn=None,
@@ -836,28 +838,31 @@ class DescrptSeA(Descriptor):
         nei_embed = tf.reshape(self.test_nei_embed, [-1, out_dim])
         # self.embedding_input = tf.concat([xyz_scatter, nei_embed],
         #                                  1)  # shape is [nframes*natoms[0]*self.nnei, 1+te_out_dim]
-        self.embedding_input = xyz_scatter_out + 0.1 * nei_embed
+        self.type_feature = nei_embed
+        self.embedding_input = xyz_scatter_out + 1.0 * nei_embed
         if not self.type_one_side:
-            # type_out = one_layer(
-            #     type_embedding,
-            #     out_dim,
-            #     name='type_net_center',
-            #     reuse=tf.AUTO_REUSE,
-            #     seed=self.seed,
-            #     activation_fn=None,
-            #     precision=self.filter_precision,
-            #     trainable=True,
-            #     uniform_seed=self.uniform_seed)
-            self.atm_embed = tf.nn.embedding_lookup(type_out, natype)  # shape is [nframes*natoms[0], out_dim]
+            type_out_center = one_layer(
+                type_embedding,
+                out_dim,
+                name='type_net_center',
+                reuse=tf.AUTO_REUSE,
+                seed=self.seed,
+                activation_fn=None,
+                precision=self.filter_precision,
+                trainable=True,
+                uniform_seed=self.uniform_seed)
+            self.atm_embed = tf.nn.embedding_lookup(type_out_center, natype)  # shape is [nframes*natoms[0], out_dim]
             self.atm_embed = tf.tile(self.atm_embed,
                                      (1, self.nnei))  # shape is [nframes*natoms[0], self.nnei*te_out_dim]
             self.atm_embed = tf.reshape(self.atm_embed,
                                         [-1, out_dim])  # shape is [nframes*natoms[0]*self.nnei, te_out_dim]
             # self.embedding_input_2 = tf.concat([self.embedding_input, self.atm_embed],
             #                                    1)  # shape is [nframes*natoms[0]*self.nnei, 1+te_out_dim+te_out_dim]
-            self.embedding_input_2 = self.embedding_input + 0.1 * self.atm_embed
-            return self.embedding_input_2
-        return self.embedding_input
+            # self.type_feature += self.atm_embed
+            self.embedding_input_2 = self.embedding_input + 1.0 * self.atm_embed
+            return self.embedding_input_2, self.type_feature
+            # return self.type_feature, self.embedding_input_2
+        return self.embedding_input, self.type_feature
 
     def _feedforward(self, input_xyz, d_in, d_mid):
         residual = input_xyz
@@ -887,10 +892,22 @@ class DescrptSeA(Descriptor):
 
     def _scaled_dot_attn(self, Q, K, V, temperature, input_r, dotr=False, do_mask=False, layer=0, save_weights=True):
         attn = tf.matmul(Q / temperature, K, transpose_b=True)
+
+        # # softmax
+        # attn *= self.nmask
+        # attn += self.negtive_mask
+        # self.attn_weight_nos[layer] = attn[0]
+        # attn = tf.nn.softmax(attn, axis=-1)
+        # attn *= tf.reshape(self.nmask, [-1, attn.shape[-1], 1])
+
+        # norm
+        attn -= self.negtive_mask
+        attn -= tf.reshape(tf.reduce_min(attn, -1), [-1, attn.shape[-1], 1])
+        self.attn_weight_nos[layer] = attn[0]
         attn *= self.nmask
-        attn += self.negtive_mask
-        attn = tf.nn.softmax(attn, axis=-1)
         attn *= tf.reshape(self.nmask, [-1, attn.shape[-1], 1])
+        attn = tf.nn.l2_normalize(attn, -1)
+
         if save_weights:
             self.attn_weight[layer] = attn[0]  # atom 0
         if dotr:
@@ -914,15 +931,32 @@ class DescrptSeA(Descriptor):
             outputs_size,
             input_r,
             dotr=False,
-            do_mask=False
+            do_mask=False,
+            type_feature=None
     ):
         sd_k = tf.sqrt(tf.cast(1., dtype=self.filter_precision))
         self.G = tf.reshape(input_xyz, (-1, shape_i[1] // 4, outputs_size[-1]))[0]
         for i in range(layer_num):
+            # input_xyz_emb = one_layer(
+            #     input_xyz,
+            #     outputs_size[-1],
+            #     name='norm_G',
+            #     reuse=tf.AUTO_REUSE,
+            #     seed=self.seed,
+            #     activation_fn=None,
+            #     precision=self.filter_precision,
+            #     trainable=True,
+            #     uniform_seed=self.uniform_seed)
+            input_xyz_emb = input_xyz
+            if type_feature is not None:
+                # input_layer = type_feature + 0.1 * tf.nn.l2_normalize(input_xyz_emb, -1) # norm
+                input_layer = type_feature + 0.1 * input_xyz_emb
+            else:
+                input_layer = input_xyz_emb
             with tf.variable_scope('attention_layer{}_'.format(i), reuse=tf.AUTO_REUSE):
-                # input_xyz_in = tf.nn.l2_normalize(input_xyz, -1)
+                # input_xyz = tf.nn.l2_normalize(input_xyz, -1)
                 Q_c = one_layer(
-                    input_xyz,
+                    input_layer,
                     self.att_n,
                     name='c_query',
                     reuse=tf.AUTO_REUSE,
@@ -932,11 +966,11 @@ class DescrptSeA(Descriptor):
                     trainable=True,
                     uniform_seed=self.uniform_seed)
                 K_c = one_layer(
-                    input_xyz,
+                    input_layer,
                     self.att_n,
                     name='c_key',
                     reuse=tf.AUTO_REUSE,
-                    seed=self.seed,
+                    seed=self.seed+1000,
                     activation_fn=None,
                     precision=self.filter_precision,
                     trainable=True,
@@ -954,12 +988,12 @@ class DescrptSeA(Descriptor):
                 # # natom x nei_type_i x out_size
                 # xyz_scatter = tf.reshape(xyz_scatter, (-1, shape_i[1] // 4, outputs_size[-1]))
                 # natom x nei_type_i x att_n
-                Q_c = tf.nn.l2_normalize(tf.reshape(Q_c, (-1, shape_i[1] // 4, self.att_n)), -1)
-                K_c = tf.nn.l2_normalize(tf.reshape(K_c, (-1, shape_i[1] // 4, self.att_n)), -1)
-                V_c = tf.nn.l2_normalize(tf.reshape(V_c, (-1, shape_i[1] // 4, self.att_n)), -1)
-                # Q_c = tf.reshape(Q_c, (-1, shape_i[1] // 4, self.att_n))
-                # K_c = tf.reshape(K_c, (-1, shape_i[1] // 4, self.att_n))
-                # V_c = tf.reshape(V_c, (-1, shape_i[1] // 4, self.att_n))
+                # Q_c = tf.nn.l2_normalize(tf.reshape(Q_c, (-1, shape_i[1] // 4, self.att_n)), -1)
+                # K_c = tf.nn.l2_normalize(tf.reshape(K_c, (-1, shape_i[1] // 4, self.att_n)), -1)
+                # V_c = tf.nn.l2_normalize(tf.reshape(V_c, (-1, shape_i[1] // 4, self.att_n)), -1)
+                Q_c = tf.reshape(Q_c, (-1, shape_i[1] // 4, self.att_n))
+                K_c = tf.reshape(K_c, (-1, shape_i[1] // 4, self.att_n))
+                V_c = tf.reshape(V_c, (-1, shape_i[1] // 4, self.att_n))
                 self.qs[i] = Q_c[0]
                 self.ks[i] = K_c[0]
                 self.vs[i] = V_c[0]
@@ -1024,8 +1058,8 @@ class DescrptSeA(Descriptor):
         if type_embedding is not None:
             assert atype is not None, 'atype must exist!!'
             type_embedding = tf.cast(type_embedding, self.filter_precision)
-            xyz_scatter = self._concat_type_embedding(
-                xyz_scatter, atype, type_embedding)
+            # xyz_scatter = self._concat_type_embedding(
+            #     xyz_scatter, atype, type_embedding)
             if self.compress:
                 raise RuntimeError('compression of type embedded descriptor is not supported at the moment')
         # with (natom x nei_type_i) x out_size
@@ -1056,14 +1090,17 @@ class DescrptSeA(Descriptor):
                         uniform_seed=self.uniform_seed,
                         initial_variables=self.embedding_net_variables)
                     if (not self.uniform_seed) and (self.seed is not None): self.seed += self.seed_shift
-                # if type_embedding is not None:
-                #     xyz_scatter = self._add_type_embedding(xyz_scatter, atype, type_embedding)
+                self.G_before = tf.reshape(xyz_scatter, (-1, shape_i[1] // 4, outputs_size[-1]))[0]
+                if type_embedding is not None:
+                    xyz_scatter, type_feature = self._add_type_embedding(xyz_scatter, atype, type_embedding)
+                else:
+                    type_feature = None
                 input_r = tf.slice(tf.reshape(inputs_i, (-1, shape_i[1] // 4, 4)), [0, 0, 1], [-1, -1, 3])
                 input_r = tf.nn.l2_normalize(input_r, -1)
                 # natom x nei_type_i x out_size
                 xyz_scatter_att = tf.reshape(
                     self._attention_layers(xyz_scatter, self.attn_layer, shape_i, outputs_size, input_r,
-                                           dotr=self.attn_dotr, do_mask=self.attn_mask),
+                                           dotr=self.attn_dotr, do_mask=self.attn_mask, type_feature=type_feature),
                                         (-1, shape_i[1] // 4, outputs_size[-1]))
                 xyz_scatter = tf.reshape(xyz_scatter, (-1, shape_i[1] // 4, outputs_size[-1]))
             else:
@@ -1149,7 +1186,11 @@ class DescrptSeA(Descriptor):
         # inputs_reshape = tf.reshape(inputs, [-1, shape[1]//4, 4])
         # natom x 4 x outputs_size
         # xyz_scatter_1 = tf.matmul(inputs_reshape, xyz_scatter, transpose_a = True)
+
+
         xyz_scatter_1 = xyz_scatter_1 * (4.0 / shape[1])
+
+
         # natom x 4 x outputs_size_2
         xyz_scatter_2 = tf.slice(xyz_scatter_1, [0, 0, 0], [-1, -1, outputs_size_2])
         # # natom x 3 x outputs_size_2
