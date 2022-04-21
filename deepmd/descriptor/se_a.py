@@ -16,7 +16,6 @@ from deepmd.utils.type_embed import embed_atom_type
 from deepmd.utils.sess import run_sess
 from deepmd.utils.graph import load_graph_def, get_tensor_by_name_from_graph, get_embedding_net_variables
 from .descriptor import Descriptor
-from IPython import embed
 
 
 class DescrptSeA(Descriptor):
@@ -288,12 +287,8 @@ class DescrptSeA(Descriptor):
             sumn = []
             sumr2 = []
             suma2 = []
-            # print('here!!!!')
-            # embed()
             if do_sel:
                 for cc, bb, tt, nn, mm, r_n in zip(data_coord, data_box, data_atype, natoms_vec, mesh, real_natoms_vec):
-                    # print('here!!!!')
-                    # embed()
                     sysr, sysr2, sysa, sysa2, sysn \
                         = self._compute_dstats_sys_smth(cc, bb, tt, nn, mm, do_sel, r_n)
                     sumr.append(sysr)
@@ -303,8 +298,6 @@ class DescrptSeA(Descriptor):
                     suma2.append(sysa2)
             else:
                 for cc, bb, tt, nn, mm in zip(data_coord, data_box, data_atype, natoms_vec, mesh):
-                    # print('here!!!!')
-                    # embed()
                     sysr, sysr2, sysa, sysa2, sysn \
                         = self._compute_dstats_sys_smth(cc, bb, tt, nn, mm)
                     sumr.append(sysr)
@@ -329,8 +322,6 @@ class DescrptSeA(Descriptor):
                 dstd = np.tile(dstdunit, self.ndescrpt // 4)
                 all_davg.append(davg)
                 all_dstd.append(dstd)
-            # print('computed !!!')
-            # embed()
 
 
         if not self.set_davg_zero:
@@ -689,8 +680,6 @@ class DescrptSeA(Descriptor):
                            self.place_holders['box']: data_box,
                            self.place_holders['default_mesh']: mesh,
                        })
-        # print('compute one !!!')
-        # embed()
         if do_sel:
             nframes = dd_all.shape[0]
             sysr = [0. for i in range(self.ntypes)]
