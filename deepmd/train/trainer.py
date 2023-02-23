@@ -5,6 +5,7 @@ import os
 import platform
 import shutil
 import time
+import math
 
 import google.protobuf.message
 import numpy as np
@@ -26,10 +27,12 @@ from deepmd.descriptor.descriptor import (
     Descriptor,
 )
 from deepmd.env import (
+    GLOBAL_NP_FLOAT_PRECISION,
     GLOBAL_ENER_FLOAT_PRECISION,
     GLOBAL_TF_FLOAT_PRECISION,
     TF_VERSION,
     get_tf_session_config,
+    default_tf_session_config,
     op_module,
     tf,
     tfv2,
@@ -39,10 +42,14 @@ from deepmd.fit import (
     EnerFitting,
     PolarFittingSeA,
 )
+from deepmd.backbone import (
+    EvoformerBackbone,
+)
 from deepmd.loss import (
     EnerDipoleLoss,
     EnerStdLoss,
     TensorLoss,
+    StruReconLoss,
 )
 from deepmd.model import (
     DipoleModel,
@@ -51,6 +58,7 @@ from deepmd.model import (
     MultiModel,
     PolarModel,
     WFCModel,
+    EvoformerModel,
 )
 from deepmd.utils import random as dp_random
 from deepmd.utils.argcheck import (
@@ -84,6 +92,8 @@ from deepmd.nvnmd.utils.config import (
     nvnmd_cfg,
 )
 
+# import wandb as wb
+
 
 def _is_subdir(path, directory):
     path = os.path.realpath(path)
@@ -103,13 +113,18 @@ class DPTrainer(object):
     def _init_param(self, jdata):
         # model config
         model_param = j_must_have(jdata, "model")
+        self.use_backbone = "backbone" in model_param
         self.multi_task_mode = "fitting_net_dict" in model_param
         descrpt_param = j_must_have(model_param, "descriptor")
-        fitting_param = (
-            j_must_have(model_param, "fitting_net")
-            if not self.multi_task_mode
-            else j_must_have(model_param, "fitting_net_dict")
-        )
+        if not self.use_backbone:
+            fitting_param = (
+                j_must_have(model_param, "fitting_net")
+                if not self.multi_task_mode
+                else j_must_have(model_param, "fitting_net_dict")
+            )
+        else:
+            backbone_param = j_must_have(model_param, "backbone")
+            self.backbone_param = backbone_param
         typeebd_param = model_param.get("type_embedding", None)
         self.model_param = model_param
         self.descrpt_param = descrpt_param
@@ -138,7 +153,10 @@ class DPTrainer(object):
                 if descrpt_item["type"] in explicit_ntypes_descrpt:
                     descrpt_item["ntypes"] = len(model_param["type_map"])
                     hybrid_with_tebd = True
-        if self.multi_task_mode:
+        if self.use_backbone:
+            assert self.descrpt_type in ["se_atten"], "backbones only support se_atten descriptor!"
+            descrpt_param["return_G"] = True
+        elif self.multi_task_mode:
             descrpt_param["multi_task"] = True
         self.descrpt = Descriptor(**descrpt_param)
 
@@ -158,26 +176,37 @@ class DPTrainer(object):
             else:
                 raise RuntimeError("unknown fitting type " + fitting_type_)
 
-        if not self.multi_task_mode:
-            fitting_type = fitting_param.get("type", "ener")
-            self.fitting_type = fitting_type
-            fitting_param.pop("type", None)
-            fitting_param["descrpt"] = self.descrpt
-            self.fitting = fitting_net_init(fitting_type, descrpt_type, fitting_param)
-        else:
-            self.fitting_dict = {}
-            self.fitting_type_dict = {}
-            self.nfitting = len(fitting_param)
-            for item in fitting_param:
-                item_fitting_param = fitting_param[item]
-                item_fitting_type = item_fitting_param.get("type", "ener")
-                self.fitting_type_dict[item] = item_fitting_type
-                item_fitting_param.pop("type", None)
-                item_fitting_param["descrpt"] = self.descrpt
-                self.fitting_dict[item] = fitting_net_init(
-                    item_fitting_type, descrpt_type, item_fitting_param
-                )
+        def backbone_init(backbone_type_, params):
+            if backbone_type_ == "evoformer":
+                return EvoformerBackbone(**params)
+            else:
+                raise RuntimeError("unknown backbone type " + backbone_type_)
 
+        if not self.use_backbone:
+            if not self.multi_task_mode:
+                fitting_type = fitting_param.get("type", "ener")
+                self.fitting_type = fitting_type
+                fitting_param.pop("type", None)
+                fitting_param["descrpt"] = self.descrpt
+                self.fitting = fitting_net_init(fitting_type, descrpt_type, fitting_param)
+            else:
+                self.fitting_dict = {}
+                self.fitting_type_dict = {}
+                self.nfitting = len(fitting_param)
+                for item in fitting_param:
+                    item_fitting_param = fitting_param[item]
+                    item_fitting_type = item_fitting_param.get("type", "ener")
+                    self.fitting_type_dict[item] = item_fitting_type
+                    item_fitting_param.pop("type", None)
+                    item_fitting_param["descrpt"] = self.descrpt
+                    self.fitting_dict[item] = fitting_net_init(
+                        item_fitting_type, descrpt_type, item_fitting_param
+                    )
+        else:
+            # backbone
+            backbone_type = backbone_param.pop("type", "evoformer")
+            backbone_param["descrpt"] = self.descrpt
+            self.backbone = backbone_init(backbone_type, backbone_param)
         # type embedding
         padding = False
         if descrpt_type == "se_atten" or hybrid_with_tebd:
@@ -209,11 +238,56 @@ class DPTrainer(object):
 
         # init model
         # infer model type by fitting_type
-        if not self.multi_task_mode:
-            if self.fitting_type == "ener":
-                self.model = EnerModel(
+        if not self.use_backbone:
+            if not self.multi_task_mode:
+                if self.fitting_type == "ener":
+                    self.model = EnerModel(
+                        self.descrpt,
+                        self.fitting,
+                        self.typeebd,
+                        model_param.get("type_map"),
+                        model_param.get("data_stat_nbatch", 10),
+                        model_param.get("data_stat_protect", 1e-2),
+                        model_param.get("use_srtab"),
+                        model_param.get("smin_alpha"),
+                        model_param.get("sw_rmin"),
+                        model_param.get("sw_rmax")
+                    )
+                # elif fitting_type == "wfc":
+                #     self.model = WFCModel(model_param, self.descrpt, self.fitting)
+                elif self.fitting_type == "dipole":
+                    self.model = DipoleModel(
+                        self.descrpt,
+                        self.fitting,
+                        self.typeebd,
+                        model_param.get("type_map"),
+                        model_param.get("data_stat_nbatch", 10),
+                        model_param.get("data_stat_protect", 1e-2)
+                    )
+                elif self.fitting_type == "polar":
+                    self.model = PolarModel(
+                        self.descrpt,
+                        self.fitting,
+                        self.typeebd,
+                        model_param.get("type_map"),
+                        model_param.get("data_stat_nbatch", 10),
+                        model_param.get("data_stat_protect", 1e-2)
+                    )
+                # elif self.fitting_type == "global_polar":
+                #     self.model = GlobalPolarModel(
+                #         self.descrpt,
+                #         self.fitting,
+                #         model_param.get("type_map"),
+                #         model_param.get("data_stat_nbatch", 10),
+                #         model_param.get("data_stat_protect", 1e-2)
+                #     )
+                else:
+                    raise RuntimeError("get unknown fitting type when building model")
+            else:  # multi-task mode
+                self.model = MultiModel(
                     self.descrpt,
-                    self.fitting,
+                    self.fitting_dict,
+                    self.fitting_type_dict,
                     self.typeebd,
                     model_param.get("type_map"),
                     model_param.get("data_stat_nbatch", 10),
@@ -221,51 +295,18 @@ class DPTrainer(object):
                     model_param.get("use_srtab"),
                     model_param.get("smin_alpha"),
                     model_param.get("sw_rmin"),
-                    model_param.get("sw_rmax"),
+                    model_param.get("sw_rmax")
                 )
-            # elif fitting_type == 'wfc':
-            #     self.model = WFCModel(model_param, self.descrpt, self.fitting)
-            elif self.fitting_type == "dipole":
-                self.model = DipoleModel(
-                    self.descrpt,
-                    self.fitting,
-                    self.typeebd,
-                    model_param.get("type_map"),
-                    model_param.get("data_stat_nbatch", 10),
-                    model_param.get("data_stat_protect", 1e-2),
-                )
-            elif self.fitting_type == "polar":
-                self.model = PolarModel(
-                    self.descrpt,
-                    self.fitting,
-                    self.typeebd,
-                    model_param.get("type_map"),
-                    model_param.get("data_stat_nbatch", 10),
-                    model_param.get("data_stat_protect", 1e-2),
-                )
-            # elif self.fitting_type == 'global_polar':
-            #     self.model = GlobalPolarModel(
-            #         self.descrpt,
-            #         self.fitting,
-            #         model_param.get('type_map'),
-            #         model_param.get('data_stat_nbatch', 10),
-            #         model_param.get('data_stat_protect', 1e-2)
-            #     )
-            else:
-                raise RuntimeError("get unknown fitting type when building model")
-        else:  # multi-task mode
-            self.model = MultiModel(
+        else:
+            self.model = EvoformerModel(
                 self.descrpt,
-                self.fitting_dict,
-                self.fitting_type_dict,
+                self.backbone,
                 self.typeebd,
                 model_param.get("type_map"),
                 model_param.get("data_stat_nbatch", 10),
                 model_param.get("data_stat_protect", 1e-2),
-                model_param.get("use_srtab"),
-                model_param.get("smin_alpha"),
-                model_param.get("sw_rmin"),
-                model_param.get("sw_rmax"),
+                model_param.get("noise", 1.00),
+                model_param.get("noise_type", "uniform"),
             )
 
         # learning rate
@@ -287,70 +328,81 @@ class DPTrainer(object):
 
         # loss
         # infer loss type by fitting_type
-        def loss_init(_loss_param, _fitting_type, _fitting, _lr):
-            _loss_type = _loss_param.get("type", "ener")
-            if _fitting_type == "ener":
-                _loss_param.pop("type", None)
-                _loss_param["starter_learning_rate"] = _lr.start_lr()
-                if _loss_type == "ener":
-                    loss = EnerStdLoss(**_loss_param)
-                elif _loss_type == "ener_dipole":
-                    loss = EnerDipoleLoss(**_loss_param)
+        def loss_init(_loss_param, _fitting_type, _fitting, _lr, _backbone=None):
+            if _backbone is None:
+                _loss_type = _loss_param.get("type", "ener")
+                if _fitting_type == "ener":
+                    _loss_param.pop("type", None)
+                    _loss_param["starter_learning_rate"] = _lr.start_lr()
+                    if _loss_type == "ener":
+                        loss = EnerStdLoss(**_loss_param)
+                    elif _loss_type == "ener_dipole":
+                        loss = EnerDipoleLoss(**_loss_param)
+                    else:
+                        raise RuntimeError("unknown loss type")
+                elif _fitting_type == "wfc":
+                    loss = TensorLoss(
+                        _loss_param,
+                        model=_fitting,
+                        tensor_name="wfc",
+                        tensor_size=_fitting.get_out_size(),
+                        label_name="wfc",
+                    )
+                elif _fitting_type == "dipole":
+                    loss = TensorLoss(
+                        _loss_param,
+                        model=_fitting,
+                        tensor_name="dipole",
+                        tensor_size=3,
+                        label_name="dipole",
+                    )
+                elif _fitting_type == "polar":
+                    loss = TensorLoss(
+                        _loss_param,
+                        model=_fitting,
+                        tensor_name="polar",
+                        tensor_size=9,
+                        label_name="polarizability",
+                    )
+                elif _fitting_type == "global_polar":
+                    loss = TensorLoss(
+                        _loss_param,
+                        model=_fitting,
+                        tensor_name="global_polar",
+                        tensor_size=9,
+                        atomic=False,
+                        label_name="polarizability",
+                    )
                 else:
-                    raise RuntimeError("unknown loss type")
-            elif _fitting_type == "wfc":
-                loss = TensorLoss(
-                    _loss_param,
-                    model=_fitting,
-                    tensor_name="wfc",
-                    tensor_size=_fitting.get_out_size(),
-                    label_name="wfc",
-                )
-            elif _fitting_type == "dipole":
-                loss = TensorLoss(
-                    _loss_param,
-                    model=_fitting,
-                    tensor_name="dipole",
-                    tensor_size=3,
-                    label_name="dipole",
-                )
-            elif _fitting_type == "polar":
-                loss = TensorLoss(
-                    _loss_param,
-                    model=_fitting,
-                    tensor_name="polar",
-                    tensor_size=9,
-                    label_name="polarizability",
-                )
-            elif _fitting_type == "global_polar":
-                loss = TensorLoss(
-                    _loss_param,
-                    model=_fitting,
-                    tensor_name="global_polar",
-                    tensor_size=9,
-                    atomic=False,
-                    label_name="polarizability",
-                )
+                    raise RuntimeError("get unknown fitting type when building loss function")
             else:
-                raise RuntimeError(
-                    "get unknown fitting type when building loss function"
-                )
+                _loss_type = _loss_param.get("type", "stru_recon")
+                _loss_param.pop("type", None)
+                if _backbone == "stru_recon":
+                    loss = StruReconLoss(_loss_param)
+                else:
+                    raise RuntimeError("get unknown backbone type when building loss function")
             return loss
 
-        if not self.multi_task_mode:
-            loss_param = jdata.get("loss", {})
-            self.loss = loss_init(loss_param, self.fitting_type, self.fitting, self.lr)
+        if not self.use_backbone:
+            if not self.multi_task_mode:
+                loss_param = jdata.get("loss", {})
+                self.loss = loss_init(loss_param, self.fitting_type, self.fitting, self.lr)
+            else:
+                self.loss_dict = {}
+                loss_param_dict = jdata.get("loss_dict", {})
+                for fitting_key in self.fitting_type_dict:
+                    loss_param = loss_param_dict.get(fitting_key, {})
+                    self.loss_dict[fitting_key] = loss_init(
+                        loss_param,
+                        self.fitting_type_dict[fitting_key],
+                        self.fitting_dict[fitting_key],
+                        self.lr,
+                    )
         else:
-            self.loss_dict = {}
-            loss_param_dict = jdata.get("loss_dict", {})
-            for fitting_key in self.fitting_type_dict:
-                loss_param = loss_param_dict.get(fitting_key, {})
-                self.loss_dict[fitting_key] = loss_init(
-                    loss_param,
-                    self.fitting_type_dict[fitting_key],
-                    self.fitting_dict[fitting_key],
-                    self.lr,
-                )
+            loss_param = jdata.get("loss", {})
+            loss_param["ntypes"] = self.model.ntypes
+            self.loss = loss_init(loss_param, "", "", self.lr, "stru_recon")
 
         # training
         tr_data = jdata["training"]
@@ -368,6 +420,13 @@ class DPTrainer(object):
         self.save_ckpt = tr_data.get("save_ckpt", "model.ckpt")
         self.display_in_training = tr_data.get("disp_training", True)
         self.timing_in_training = tr_data.get("time_training", True)
+        if self.use_backbone:
+            self.noise = float(tr_data.get("noise", 1.00))
+            self.noise_type = tr_data.get("noise_type", "uniform")
+            self.coord_noise_num = tr_data.get("coord_noise_num", 10)
+            self.masked_token_num = tr_data.get("masked_token_num", 10)
+            self.same_mask = tr_data.get("same_mask", False)
+            self._min_dist_sub_graph()
         self.profiling = self.run_opt.is_chief and tr_data.get("profiling", False)
         self.profiling_file = tr_data.get("profiling_file", "timeline.json")
         self.enable_profiler = tr_data.get("enable_profiler", False)
@@ -375,6 +434,9 @@ class DPTrainer(object):
         self.tensorboard_log_dir = tr_data.get("tensorboard_log_dir", "log")
         self.tensorboard_freq = tr_data.get("tensorboard_freq", 1)
         self.mixed_prec = tr_data.get("mixed_precision", None)
+        # name_path = os.path.abspath('.').split('/')
+        # wb.init(project="DPA", entity="dp_model_engineering", config=model_param,
+        #         name=name_path[-2] + '/' + name_path[-1], settings=wb.Settings(start_method="fork"))
         if self.mixed_prec is not None:
             if (
                 self.mixed_prec["compute_prec"] not in ("float16", "bfloat16")
@@ -388,37 +450,43 @@ class DPTrainer(object):
         # self.sys_probs = tr_data['sys_probs']
         # self.auto_prob_style = tr_data['auto_prob']
         self.useBN = False
-        if not self.multi_task_mode:
-            if self.fitting_type == "ener" and self.fitting.get_numb_fparam() > 0:
-                self.numb_fparam = self.fitting.get_numb_fparam()
-            else:
-                self.numb_fparam = 0
+        if not self.use_backbone:
+            if not self.multi_task_mode:
+                if self.fitting_type == "ener" and self.fitting.get_numb_fparam() > 0:
+                    self.numb_fparam = self.fitting.get_numb_fparam()
+                else:
+                    self.numb_fparam = 0
 
+                if tr_data.get("validation_data", None) is not None:
+                    self.valid_numb_batch = tr_data["validation_data"].get("numb_btch", 1)
+                else:
+                    self.valid_numb_batch = 1
+            else:
+                self.numb_fparam_dict = {}
+                self.valid_numb_batch_dict = {}
+                for fitting_key in self.fitting_type_dict:
+                    if (
+                        self.fitting_type_dict[fitting_key] == "ener"
+                        and self.fitting_dict[fitting_key].get_numb_fparam() > 0
+                    ):
+                        self.numb_fparam_dict[fitting_key] = self.fitting_dict[
+                            fitting_key
+                        ].get_numb_fparam()
+                    else:
+                        self.numb_fparam_dict[fitting_key] = 0
+                data_dict = tr_data.get("data_dict", None)
+                for systems in data_dict:
+                    if data_dict[systems].get("validation_data", None) is not None:
+                        self.valid_numb_batch_dict[systems] = data_dict[systems][
+                            "validation_data"
+                        ].get("numb_btch", 1)
+                    else:
+                        self.valid_numb_batch_dict[systems] = 1
+        else:
             if tr_data.get("validation_data", None) is not None:
                 self.valid_numb_batch = tr_data["validation_data"].get("numb_btch", 1)
             else:
                 self.valid_numb_batch = 1
-        else:
-            self.numb_fparam_dict = {}
-            self.valid_numb_batch_dict = {}
-            for fitting_key in self.fitting_type_dict:
-                if (
-                    self.fitting_type_dict[fitting_key] == "ener"
-                    and self.fitting_dict[fitting_key].get_numb_fparam() > 0
-                ):
-                    self.numb_fparam_dict[fitting_key] = self.fitting_dict[
-                        fitting_key
-                    ].get_numb_fparam()
-                else:
-                    self.numb_fparam_dict[fitting_key] = 0
-            data_dict = tr_data.get("data_dict", None)
-            for systems in data_dict:
-                if data_dict[systems].get("validation_data", None) is not None:
-                    self.valid_numb_batch_dict[systems] = data_dict[systems][
-                        "validation_data"
-                    ].get("numb_btch", 1)
-                else:
-                    self.valid_numb_batch_dict[systems] = 1
 
         # if init the graph with the frozen model
         self.frz_model = None
@@ -430,7 +498,7 @@ class DPTrainer(object):
         self.stop_batch = stop_batch
 
         if not self.multi_task_mode:
-            if not self.is_compress and data.mixed_type:
+            if not self.use_backbone and not self.is_compress and data.mixed_type:
                 assert self.descrpt_type in [
                     "se_atten"
                 ], "Data in mixed_type format must use attention descriptor!"
@@ -438,7 +506,7 @@ class DPTrainer(object):
                     "ener"
                 ], "Data in mixed_type format must use ener fitting!"
 
-            if self.numb_fparam > 0:
+            if not self.use_backbone and self.numb_fparam > 0:
                 log.info("training with %d frame parameter(s)" % self.numb_fparam)
             else:
                 log.info("training without frame parameter")
@@ -584,6 +652,11 @@ class DPTrainer(object):
             tf.int32, [None], name="t_mesh"
         )
         self.place_holders["is_training"] = tf.placeholder(tf.bool)
+        if self.use_backbone:
+            self.place_holders["clean_type"] = tf.placeholder(tf.int32, [None], name="t_clean_type")
+            self.place_holders["clean_coord"] = tf.placeholder(GLOBAL_TF_FLOAT_PRECISION, [None], name="t_clean_coord")
+            self.place_holders["noise_mask"] = tf.placeholder(GLOBAL_TF_FLOAT_PRECISION, [None], name="t_noise_mask")
+            self.place_holders["token_mask"] = tf.placeholder(GLOBAL_TF_FLOAT_PRECISION, [None], name="t_token_mask")
         self.model_pred = self.model.build(
             self.place_holders["coord"],
             self.place_holders["type"],
@@ -863,6 +936,28 @@ class DPTrainer(object):
                 )
                 tb_train_writer.add_summary(summary, cur_batch)
             else:
+                # coord_output, \
+                # coord_hat, \
+                # type_output, \
+                # type_hat,\
+                # noise_mask,\
+                # token_mask,\
+                # l2_more,\
+                # loss \
+                #     = run_sess(
+                #     self.sess,
+                #     [self.loss.coord_output,
+                #      self.loss.coord_hat,
+                #      self.loss.type_output,
+                #      self.loss.type_hat,
+                #      self.loss.noise_mask,
+                #      self.loss.token_mask,
+                #      self.loss.l2_more,
+                #      self.loss.loss],
+                #     feed_dict=train_feed_dict,
+                #     options=prf_options,
+                #     run_metadata=prf_run_metadata,
+                # )
                 run_sess(
                     self.sess,
                     [batch_train_op],
@@ -999,7 +1094,81 @@ class DPTrainer(object):
         for ii in ["natoms_vec", "default_mesh"]:
             feed_dict[self.place_holders[ii]] = batch[ii]
         feed_dict[self.place_holders["is_training"]] = is_training
+        if self.use_backbone:
+            # add noise and mask here
+            clean_coord = feed_dict[self.place_holders["coord"]]
+            feed_dict[self.place_holders["clean_coord"]] = clean_coord
+            clean_type = feed_dict[self.place_holders["type"]]
+            feed_dict[self.place_holders["clean_type"]] = clean_type
+            (
+                feed_dict[self.place_holders["coord"]],
+                feed_dict[self.place_holders["type"]],
+                feed_dict[self.place_holders["noise_mask"]],
+                feed_dict[self.place_holders["token_mask"]],
+             ) = self.add_noise_mask(
+                clean_coord,
+                clean_type,
+                batch,
+                _coord_noise_num=self.coord_noise_num,
+                _masked_token_num=self.masked_token_num,
+            )
         return feed_dict
+
+    def add_noise_mask(self, _clean_coord, _clean_type, _batch, _coord_noise_num=10, _masked_token_num=10):
+        natom = _batch["natoms_vec"][1]
+        box = _batch["box"].reshape([-1, 9])
+        natoms_vec = _batch["natoms_vec"]
+        default_mesh = _batch["default_mesh"]
+        _clean_coord = _clean_coord.reshape([-1, natom * 3])
+        _clean_type = _clean_type.reshape([-1, natom])
+        nframes = _clean_coord.shape[0]
+        coord_noise_num = _coord_noise_num if _coord_noise_num < natom else natom
+        noise_idx = np.random.choice(natom, coord_noise_num, replace=False)
+        noise_mask = np.full(natom, False)
+        noise_mask[noise_idx] = True
+
+        if not self.same_mask:
+            masked_token_num = _masked_token_num if _masked_token_num < natom else natom
+            token_idx = np.random.choice(natom, masked_token_num, replace=False)
+            token_mask = np.full(natom, False)
+            token_mask[token_idx] = True
+        else:
+            token_mask = noise_mask
+
+        def add_noise(__clean_coord, _noise_mask):
+            noise_c = None
+            if self.noise_type == "trunc_normal":
+                noise_c = np.clip(
+                    np.random.randn(nframes, natom, 3) * self.noise,
+                    a_min=-self.noise * 2.0,
+                    a_max=self.noise * 2.0,
+                )
+            elif self.noise_type == "normal":
+                noise_c = np.random.randn(nframes, natom, 3) * self.noise
+            elif self.noise_type == "uniform":
+                noise_c = np.random.uniform(
+                    low=-self.noise, high=self.noise, size=(nframes, natom, 3)
+                )
+            else:
+                RuntimeError("Unknown noise type !")
+            noise_c[:, _noise_mask == False, :] = 0.0
+            noise_c = noise_c.reshape([-1, natom * 3])
+            return __clean_coord + noise_c
+
+        temp_type = _clean_type.copy()
+        temp_type[:, token_mask] = self.model.ntypes - 1  # masked type
+        while True:
+            temp_coord = add_noise(_clean_coord, noise_mask)
+            temp_feed_dict = {}
+            temp_feed_dict[self.place_holders_temp["coord"]] = temp_coord
+            temp_feed_dict[self.place_holders_temp["box"]] = box
+            temp_feed_dict[self.place_holders_temp["type"]] = temp_type
+            temp_feed_dict[self.place_holders_temp["natoms_vec"]] = natoms_vec
+            temp_feed_dict[self.place_holders_temp["default_mesh"]] = default_mesh
+            temp_min_nbor_dist = run_sess(self.sub_sess, [self.temp_min_nbor_dist], feed_dict=temp_feed_dict)[0]
+            if not math.isclose(temp_min_nbor_dist.min(), 0.0, rel_tol=1e-6):
+                return temp_coord.reshape(-1), temp_type.reshape(-1), \
+                       noise_mask.astype(GLOBAL_NP_FLOAT_PRECISION), token_mask.astype(GLOBAL_NP_FLOAT_PRECISION)
 
     def get_global_step(self):
         return run_sess(self.sess, self.global_step)
@@ -1016,9 +1185,28 @@ class DPTrainer(object):
     def valid_on_the_fly(self, fp, train_batches, valid_batches, print_header=False):
         train_results = self.get_evaluation_results(train_batches)
         valid_results = self.get_evaluation_results(valid_batches)
+        # train_logs = {}
+        # valid_logs = {}
+        # if not self.multi_task_mode:
+        #     for k, v in train_results.items():
+        #         train_logs[k + '_train'] = v
+        #     wb.log(train_logs, step=self.cur_batch)
+        #     for k, v in valid_results.items():
+        #         valid_logs[k + '_valid'] = v
+        #     wb.log(valid_logs, step=self.cur_batch)
+        # else:
+        #     for item in train_results:
+        #         for k, v in train_results[item].items():
+        #             train_logs[k + '_train'] = v
+        #     wb.log(train_logs, step=self.cur_batch)
+        #     for item in valid_results:
+        #         for k, v in valid_results[item].items():
+        #             valid_logs[k + '_valid'] = v
+        #     wb.log(valid_logs, step=self.cur_batch)
 
         cur_batch = self.cur_batch
         current_lr = run_sess(self.sess, self.learning_rate)
+        # wb.log({'lr': current_lr}, step=self.cur_batch)
         if print_header:
             self.print_header(fp, train_results, valid_results, self.multi_task_mode)
         self.print_on_training(
@@ -1260,3 +1448,31 @@ class DPTrainer(object):
             bias_shift=bias_shift,
             ntest=self.model_param.get("data_bias_nsample", 10),
         )
+
+    def _min_dist_sub_graph(self):
+        self.place_holders_temp = {}
+        sub_graph = tf.Graph()
+        with sub_graph.as_default():
+            name_pfx = "min_dist_"
+            for ii in ["coord", "box"]:
+                self.place_holders_temp[ii] = tf.placeholder(
+                    GLOBAL_NP_FLOAT_PRECISION, [None, None], name=name_pfx + "t_" + ii
+                )
+            self.place_holders_temp["type"] = tf.placeholder(
+                tf.int32, [None, None], name=name_pfx + "t_type"
+            )
+            self.place_holders_temp["natoms_vec"] = tf.placeholder(
+                tf.int32, [self.model.ntypes + 2], name=name_pfx + "t_natoms"
+            )
+            self.place_holders_temp["default_mesh"] = tf.placeholder(
+                tf.int32, [None], name=name_pfx + "t_mesh"
+            )
+            self.temp_max_nbor_size, self.temp_min_nbor_dist = op_module.neighbor_stat(
+                self.place_holders_temp["coord"],
+                self.place_holders_temp["type"],
+                self.place_holders_temp["natoms_vec"],
+                self.place_holders_temp["box"],
+                self.place_holders_temp["default_mesh"],
+                rcut=self.model.rcut,
+            )
+        self.sub_sess = tf.Session(graph=sub_graph, config=default_tf_session_config)

@@ -135,16 +135,28 @@ class Model(ABC):
             The descriptor tensor
         """
         if frz_model is None and ckpt_meta is None:
-            dout = self.descrpt.build(
-                coord_,
-                atype_,
-                natoms,
-                box,
-                mesh,
-                input_dict,
-                suffix=suffix,
-                reuse=reuse,
-            )
+            if not self.descrpt.return_G:
+                dout = self.descrpt.build(
+                    coord_,
+                    atype_,
+                    natoms,
+                    box,
+                    mesh,
+                    input_dict,
+                    suffix=suffix,
+                    reuse=reuse,
+                )
+            else:
+                dout, environ_G = self.descrpt.build(
+                    coord_,
+                    atype_,
+                    natoms,
+                    box,
+                    mesh,
+                    input_dict,
+                    suffix=suffix,
+                    reuse=reuse)
+                environ_G = tf.identity(environ_G, name='o_environ_matrix')
             dout = tf.identity(dout, name="o_descriptor")
         else:
             tf.constant(
@@ -163,9 +175,17 @@ class Model(ABC):
                 )
             else:
                 raise RuntimeError("should not reach here")  # pragma: no cover
-            dout = imported_tensors[-1]
-            self.descrpt.pass_tensors_from_frz_model(*imported_tensors[:-1])
-        return dout
+            if not self.descrpt.return_G:
+                dout = imported_tensors[-1]
+                self.descrpt.pass_tensors_from_frz_model(*imported_tensors[:-1])
+            else:
+                dout = imported_tensors[-2]
+                environ_G = imported_tensors[-1]
+                self.descrpt.pass_tensors_from_frz_model(*imported_tensors[:-2])
+        if not self.descrpt.return_G:
+            return dout
+        else:
+            return dout, environ_G
 
     def _import_graph_def_from_frz_model(
         self, frz_model: str, feed_dict: dict, return_elements: List[str]

@@ -5,3 +5,6 @@ from .ener import (
 from .tensor import (
     TensorLoss,
 )
+from .stru import (
+    StruReconLoss
+)

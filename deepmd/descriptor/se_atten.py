@@ -5,6 +5,7 @@ from typing import (
     List,
     Optional,
     Tuple,
+    Union,
 )
 
 import numpy as np
@@ -102,6 +103,8 @@ class DescrptSeAtten(DescrptSeA):
             Whether to mask the diagonal in the attention weights.
     multi_task
             If the model has multi fitting nets to train.
+    return_G
+            Return G or not.
     """
 
     def __init__(
@@ -126,6 +129,7 @@ class DescrptSeAtten(DescrptSeA):
         attn_dotr: bool = True,
         attn_mask: bool = False,
         multi_task: bool = False,
+        return_G: bool = False,
     ) -> None:
         DescrptSeA.__init__(
             self,
@@ -156,6 +160,7 @@ class DescrptSeAtten(DescrptSeA):
         self.attn_layer = attn_layer
         self.attn_mask = attn_mask
         self.attn_dotr = attn_dotr
+        self.return_G = return_G
 
         # descrpt config
         self.sel_all_a = [sel]
@@ -306,7 +311,7 @@ class DescrptSeAtten(DescrptSeA):
         input_dict: dict,
         reuse: Optional[bool] = None,
         suffix: str = "",
-    ) -> tf.Tensor:
+    ) -> Union[tf.Tensor, Tuple[tf.Tensor, tf.Tensor]]:
         """
         Build the computational graph for the descriptor
 
@@ -401,6 +406,10 @@ class DescrptSeAtten(DescrptSeA):
             sel_a=self.sel_all_a,
             sel_r=self.sel_all_r,
         )
+        input_dict['rij'] = self.rij
+        input_dict['nlist'] = self.nlist
+        input_dict['descrpt'] = self.descrpt
+        input_dict['nmask'] = self.nmask
         self.nei_type_vec = tf.reshape(self.nei_type_vec, [-1])
         self.nmask = tf.cast(
             tf.reshape(self.nmask, [-1, 1, self.sel_all_a[0]]),
@@ -430,7 +439,11 @@ class DescrptSeAtten(DescrptSeA):
 
         # only used when tensorboard was set as true
         tf.summary.histogram("embedding_net_output", self.dout)
-        return self.dout
+        input_dict['xyz_scatter_att'] = self.xyz_scatter_att
+        if not self.return_G:
+            return self.dout
+        else:
+            return self.dout, self.xyz_scatter_att
 
     def _pass_filter(
         self, inputs, atype, natoms, input_dict, reuse=None, suffix="", trainable=True
@@ -850,7 +863,7 @@ class DescrptSeAtten(DescrptSeA):
             )
             input_r = tf.nn.l2_normalize(input_r, -1)
             # natom x nei_type_i x out_size
-            xyz_scatter_att = tf.reshape(
+            self.xyz_scatter_att = tf.reshape(
                 self._attention_layers(
                     xyz_scatter,
                     self.attn_layer,
@@ -874,7 +887,7 @@ class DescrptSeAtten(DescrptSeA):
         # So we need to explicitly assign the shape to tf.shape(inputs_i)[0] instead of -1
         return tf.matmul(
             tf.reshape(inputs_i, [natom, shape_i[1] // 4, 4]),
-            xyz_scatter_att,
+            self.xyz_scatter_att,
             transpose_a=True,
         )
 

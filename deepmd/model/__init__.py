@@ -10,3 +10,6 @@ from .tensor import (
     PolarModel,
     WFCModel,
 )
+from .evoformer import (
+    EvoformerModel,
+)

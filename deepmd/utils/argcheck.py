@@ -613,6 +613,121 @@ def fitting_variant_type_args():
     )
 
 
+# --- Backbone configurations: --- #
+def backbone_evoformer():
+    doc_attn_head = "Number of attention heads in local self-attention structure."
+    doc_feature_dim = "Length of hidden dimension of embeddings in evoformer."
+    doc_ffn_dim = "Length of hidden dimension of embeddings in FFN structure."
+    doc_evo_layer = "Number of evoformer layers."
+    doc_layer_norm = f"Use pre/post layer normalization or not, supported options are {list_to_doc(['pre', 'post', 'none'])}."
+    doc_final_layer_norm = "Use final layer normalization or not."
+    doc_final_head_layer_norm = "Use final head layer normalization or not."
+    doc_emb_layer_norm = "Use embedding layer normalization or not."
+    doc_activation_function = f'The activation function in the embedding net. Supported activation functions are {list_to_doc(ACTIVATION_FN_DICT.keys())} Note that "gelu" denotes the custom operator version, and "gelu_tf" denotes the TF standard version.'
+    doc_trainable = "Whether the parameters in the backbone are trainable."
+    doc_precision = f"The precision of the backbone parameters, supported options are {list_to_doc(PRECISION_DICT.keys())} Default follows the interface precision."
+    doc_seed = "Random seed for parameter initialization of the backbone"
+    return [
+        Argument(
+            "attn_head",
+            int,
+            optional=True,
+            default=64,
+            doc=doc_attn_head,
+        ),
+        Argument(
+            "feature_dim",
+            int,
+            optional=True,
+            default=512,
+            doc=doc_feature_dim,
+        ),
+        Argument(
+            "ffn_dim",
+            int,
+            optional=True,
+            default=2048,
+            doc=doc_ffn_dim,
+        ),
+        Argument(
+            "evo_layer",
+            int,
+            optional=True,
+            default=15,
+            doc=doc_evo_layer,
+        ),
+        Argument(
+            "layer_norm",
+            str,
+            optional=True,
+            default='pre',
+            doc=doc_layer_norm,
+        ),
+        Argument(
+            "final_layer_norm",
+            bool,
+            optional=True,
+            default=True,
+            doc=doc_final_layer_norm,
+        ),
+        Argument(
+            "final_head_layer_norm",
+            bool,
+            optional=True,
+            default=True,
+            doc=doc_final_head_layer_norm,
+        ),
+        Argument(
+            "emb_layer_norm",
+            bool,
+            optional=True,
+            default=True,
+            doc=doc_emb_layer_norm,
+        ),
+        Argument(
+            "activation_function",
+            str,
+            optional=True,
+            default="relu",
+            doc=doc_activation_function,
+        ),
+        Argument(
+            "trainable",
+            bool,
+            optional=True,
+            default=True,
+            doc=doc_trainable,
+        ),
+        Argument(
+            "seed",
+            [int, None],
+            optional=True,
+            doc=doc_seed,
+        ),
+        Argument(
+            "precision",
+            str,
+            optional=True,
+            default='default',
+            doc=doc_precision,
+        ),
+    ]
+
+
+def backbone_variant_type_args():
+    doc_backbone_type = 'The type of the backbone.'
+
+    return Variant(
+        "type",
+        [
+            Argument("evoformer", dict, backbone_evoformer()),
+        ],
+        optional=True,
+        default_tag='evoformer',
+        doc=doc_backbone_type,
+    )
+
+
 #  --- Modifier configurations: --- #
 def modifier_dipole_charge():
     doc_model_name = "The name of the frozen dipole model file."
@@ -680,6 +795,9 @@ def model_args():
     doc_descrpt = "The descriptor of atomic environment."
     doc_fitting = "The fitting of physical properties."
     doc_fitting_net_dict = "The dictionary of multiple fitting nets in multi-task mode. Each fitting_net_dict[fitting_key] is the single definition of fitting of physical properties with user-defined name `fitting_key`."
+    doc_backbone = "The backbone structure to do pretraining."
+    doc_noise = "The scale of noise on coord (Angstrom)."
+    doc_noise_type = f"The type of added noise on coord, supported options are {list_to_doc(['uniform', 'normal', 'trunc_normal'])}."
     doc_modifier = "The modifier of model output."
     doc_use_srtab = "The table for the short-range pairwise interaction added on top of DP. The table is a text data file with (N_t + 1) * N_t / 2 + 1 columes. The first colume is the distance between atoms. The second to the last columes are energies for pairs of certain types. For example we have two atom types, 0 and 1. The columes from 2nd to 4th are for 0-0, 0-1 and 1-1 correspondingly."
     doc_smin_alpha = "The short-range tabulated interaction will be swithed according to the distance of the nearest neighbor. This distance is calculated by softmin. This parameter is the decaying parameter in the softmin. It is only required when `use_srtab` is provided."
@@ -737,6 +855,14 @@ def model_args():
                 doc=doc_fitting,
             ),
             Argument("fitting_net_dict", dict, optional=True, doc=doc_fitting_net_dict),
+            Argument(
+                "backbone",
+                dict,
+                [],
+                [backbone_variant_type_args()],
+                optional=True,
+                doc=doc_backbone,
+            ),
             Argument(
                 "modifier",
                 dict,
@@ -931,14 +1057,76 @@ def loss_tensor():
     ]
 
 
+def loss_stru():
+    doc_masked_token_loss = "The pref of loss to predict the masked type token."
+    doc_masked_coord_loss = "The pref of loss to predict the masked coord."
+    doc_norm_loss = "The pref of normalization loss."
+    doc_use_l1 = "Use smooth l1 loss or l2 loss."
+    doc_beta = "The beta in smooth l1 loss."
+    doc_mask_loss_coord = "Mask the coord loss or not"
+    doc_mask_loss_token = "Mask the token loss or not"
+    return [
+        Argument(
+            "masked_token_loss",
+            [float, int],
+            optional=True,
+            default=1.00,
+            doc=doc_masked_token_loss,
+        ),
+        Argument(
+            "masked_coord_loss",
+            [float, int],
+            optional=True,
+            default=1.00,
+            doc=doc_masked_coord_loss,
+        ),
+        Argument(
+            "norm_loss",
+            [float, int],
+            optional=True,
+            default=1.00,
+            doc=doc_norm_loss,
+        ),
+        Argument(
+            "use_l1",
+            bool,
+            optional=True,
+            default=True,
+            doc=doc_use_l1,
+        ),
+        Argument(
+            "beta",
+            [float, int],
+            optional=True,
+            default=1.00,
+            doc=doc_beta,
+        ),
+        Argument(
+            "mask_loss_coord",
+            bool,
+            optional=True,
+            default=True,
+            doc=doc_mask_loss_coord,
+        ),
+        Argument(
+            "mask_loss_token",
+            bool,
+            optional=True,
+            default=True,
+            doc=doc_mask_loss_token,
+        ),
+    ]
+
+
 def loss_variant_type_args():
-    doc_loss = "The type of the loss. When the fitting type is `ener`, the loss type should be set to `ener` or left unset. When the fitting type is `dipole` or `polar`, the loss type should be set to `tensor`."
+    doc_loss = "The type of the loss. When the fitting type is `ener`, the loss type should be set to `ener` or left unset. When the fitting type is `dipole` or `polar`, the loss type should be set to `tensor`. When using backbone for pretraining tasks, the loss type should be set to `stru`."
 
     return Variant(
         "type",
         [
             Argument("ener", dict, loss_ener()),
             Argument("tensor", dict, loss_tensor()),
+            Argument("stru", dict, loss_stru()),
             # Argument("polar", dict, loss_tensor()),
             # Argument("global_polar", dict, loss_tensor("global"))
         ],
@@ -1164,6 +1352,11 @@ def training_args():  # ! modified by Ziyao: data configuration isolated.
         "Weights will be normalized and minus ones will be ignored. "
         "If not set, each fitting net will be equally selected when training."
     )
+    doc_noise = "The scale of noise on coord (Angstrom)."
+    doc_noise_type = f"The type of added noise on coord, supported options are {list_to_doc(['uniform', 'normal', 'trunc_normal'])}."
+    doc_same_mask = "Use the same mask in noise and token mask."
+    doc_coord_noise_num = "Number of noised atoms."
+    doc_masked_token_num = "Number of masked atom tokens."
 
     arg_training_data = training_data_args()
     arg_validation_data = validation_data_args()
@@ -1190,6 +1383,21 @@ def training_args():  # ! modified by Ziyao: data configuration isolated.
         ),
         Argument(
             "time_training", bool, optional=True, default=True, doc=doc_time_training
+        ),
+        Argument(
+            "noise", [float, int], optional=True, default=1.00, doc=doc_noise
+        ),
+        Argument(
+            "noise_type", str, optional=True, default='uniform', doc=doc_noise_type
+        ),
+        Argument(
+            "coord_noise_num", int, optional=True, default=10, doc=doc_coord_noise_num
+        ),
+        Argument(
+            "masked_token_num", int, optional=True, default=10, doc=doc_masked_token_num
+        ),
+        Argument(
+            "same_mask", bool, optional=True, default=False, doc=doc_same_mask
         ),
         Argument("profiling", bool, optional=True, default=False, doc=doc_profiling),
         Argument(
@@ -1469,8 +1677,8 @@ def normalize(data):
         data["model"]["descriptor"]["list"] = normalize_hybrid_list(
             data["model"]["descriptor"]["list"]
         )
-
-    data = normalize_multi_task(data)
+    if "backbone" not in data["model"]:
+        data = normalize_multi_task(data)
     ma = model_args()
     lra = learning_rate_args()
     la = loss_args()
