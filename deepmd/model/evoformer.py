@@ -152,35 +152,6 @@ class EvoformerModel(Model):
         atype = tf.reshape(atype_, [-1, natoms[1]])
         box = tf.reshape(box, [-1, 9])
         input_dict['nframes'] = tf.shape(coord)[0]
-        # # add noise and mask here
-        # def add_noise(coord_clean):
-        #     coord_noise = None
-        #     if self.noise_type == 'uniform':
-        #         coord_noise = coord_clean + tf.random.uniform(
-        #             minval=-self.noise, maxval=self.noise, shape=[tf.shape(coord_clean)[0], natoms[1] * 3], dtype=self.descrpt.filter_precision)
-        #     elif self.noise_type == 'normal':
-        #         coord_noise = coord_clean + tf.random.normal(
-        #             mean=0.0, stddev=self.noise, shape=[tf.shape(coord_clean)[0], natoms[1] * 3], dtype=self.descrpt.filter_precision)
-        #     elif self.noise_type == 'trunc_normal':
-        #         coord_noise = coord_clean + tf.clip_by_value(
-        #             tf.random.normal(
-        #                 mean=0.0, stddev=self.noise, shape=[tf.shape(coord_clean)[0], natoms[1] * 3], dtype=self.descrpt.filter_precision),
-        #             clip_value_max=2 * self.noise, clip_value_min=-2 * self.noise)
-        #     else:
-        #         RuntimeError("Unknown noise type!")
-        #     return coord_noise
-
-        # while True:
-        #     coord_noise = add_noise(coord)
-        #     _max_nbor_size, _min_nbor_dist = op_module.neighbor_stat(
-        #         coord_noise,
-        #         atype,
-        #         natoms,
-        #         box,
-        #         mesh,
-        #         rcut=self.rcut,
-        #     )
-        # coord = add_noise(coord)
 
         # type embedding if any
         if self.typeebd is not None:
@@ -193,15 +164,15 @@ class EvoformerModel(Model):
         input_dict['atype'] = atype_
         input_dict['nnei'] = self.descrpt.sel_all_a[0]
 
-        dout, environ_G = self.build_descrpt(
+        self.atomic_rep, self.pair_rep = self.build_descrpt(
             coord, atype, natoms, box, mesh, input_dict,
             frz_model=frz_model,
             ckpt_meta=ckpt_meta,
             suffix=suffix,
             reuse=reuse)
 
-        atomic_rep, pair_rep, coord_update, logits, norm_x, norm_delta_pair_rep = self.backbone.build(dout,
-                                                                                                      environ_G,
+        atomic_rep, pair_rep, coord_update, logits, norm_x, norm_delta_pair_rep = self.backbone.build(self.atomic_rep,
+                                                                                                      self.pair_rep,
                                                                                                       natoms,
                                                                                                       input_dict,
                                                                                                       reuse=reuse,

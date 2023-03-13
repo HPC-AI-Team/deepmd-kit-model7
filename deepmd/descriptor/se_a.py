@@ -214,6 +214,7 @@ class DescrptSeA(DescrptSe):
         self.mixed_prec = None
         self.place_holders = {}
         self.nei_type = np.repeat(np.arange(self.ntypes), self.sel_a)  # like a mask
+        self.return_G = False
 
         avg_zero = np.zeros([self.ntypes, self.ndescrpt]).astype(
             GLOBAL_NP_FLOAT_PRECISION

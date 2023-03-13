@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 
-import glob
 import logging
-import os.path
-import time
 from typing import (
     List,
     Optional,
-    Tuple,
 )
 
 import numpy as np
@@ -64,25 +60,28 @@ class DeepmdData:
         root = DPPath(sys_path)
         self.dirs = root.glob(set_prefix + ".*")
         self.dirs.sort()
-        self.mixed_type = self._check_mode(
-            self.dirs[0]
-        )  # mixed_type format only has one set
+        # check mix_type format
+        error_format_msg = (
+            "if one of the set is of mixed_type format, "
+            "then all of the sets in this system should be of mixed_type format!"
+        )
+        self.mixed_type = self._check_mode(self.dirs[0])
+        for set_item in self.dirs[1:]:
+            assert self._check_mode(set_item) == self.mixed_type, error_format_msg
         # load atom type
         self.atom_type = self._load_type(root)
         self.natoms = len(self.atom_type)
-        if self.mixed_type:
-            # nframes x natoms
-            self.atom_type_mix = self._load_type_mix(self.dirs[0])
         # load atom type map
         self.type_map = self._load_type_map(root)
         assert (
             optional_type_map or self.type_map is not None
-        ), "System {} must have type_map.raw in this mode! ".format(sys_path)
+        ), f"System {sys_path} must have type_map.raw in this mode! "
         if self.type_map is not None:
             assert len(self.type_map) >= max(self.atom_type) + 1
         # check pbc
         self.pbc = self._check_pbc(root)
         # enforce type_map if necessary
+        self.enforce_type_map = False
         if type_map is not None and self.type_map is not None:
             if not self.mixed_type:
                 atom_type_ = [
@@ -90,21 +89,11 @@ class DeepmdData:
                 ]
                 self.atom_type = np.array(atom_type_, dtype=np.int32)
             else:
+                self.enforce_type_map = True
                 sorter = np.argsort(type_map)
-                type_idx_map = sorter[
-                    np.searchsorted(type_map, self.type_map, sorter=sorter)
-                ]
-                try:
-                    atom_type_mix_ = np.array(type_idx_map)[self.atom_type_mix].astype(
-                        np.int32
-                    )
-                except RuntimeError as e:
-                    raise RuntimeError(
-                        "some types in 'real_atom_types.npy' of sys {} are not contained in {} types!".format(
-                            self.dirs[0], self.get_ntypes()
-                        )
-                    ) from e
-                self.atom_type_mix = atom_type_mix_
+                self.type_idx_map = np.array(
+                    sorter[np.searchsorted(type_map, self.type_map, sorter=sorter)]
+                )
             self.type_map = type_map
         if type_map is None and self.type_map is None and self.mixed_type:
             raise RuntimeError("mixed_type format must have type_map!")
@@ -456,7 +445,7 @@ class DeepmdData:
         idx = np.arange(nframes)
         # the training times of each frame
         idx = np.repeat(idx, np.reshape(data["numb_copy"], (nframes,)))
-        dp_random.shuffle(idx)
+        # dp_random.shuffle(idx)
         for kk in data:
             if (
                 type(data[kk]) == np.ndarray
@@ -510,7 +499,19 @@ class DeepmdData:
                 )
 
         if self.mixed_type:
-            real_type = self.atom_type_mix.reshape([nframes, self.natoms])
+            # nframes x natoms
+            atom_type_mix = self._load_type_mix(set_name)
+            if self.enforce_type_map:
+                try:
+                    atom_type_mix_ = self.type_idx_map[atom_type_mix].astype(np.int32)
+                except IndexError as e:
+                    raise IndexError(
+                        "some types in 'real_atom_types.npy' of set {} are not contained in {} types!".format(
+                            set_name, self.get_ntypes()
+                        )
+                    ) from e
+                atom_type_mix = atom_type_mix_
+            real_type = atom_type_mix.reshape([nframes, self.natoms])
             data["type"] = real_type
             natoms = data["type"].shape[1]
             # nframes x ntypes
@@ -520,8 +521,8 @@ class DeepmdData:
             ).T
             assert (
                 atom_type_nums.sum(axis=-1) == natoms
-            ).all(), "some types in 'real_atom_types.npy' of sys {} are not contained in {} types!".format(
-                self.dirs[0], self.get_ntypes()
+            ).all(), "some types in 'real_atom_types.npy' of set {} are not contained in {} types!".format(
+                set_name, self.get_ntypes()
             )
             data["real_natoms_vec"] = np.concatenate(
                 (

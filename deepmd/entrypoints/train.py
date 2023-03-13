@@ -415,8 +415,12 @@ def get_nbor_stat(jdata, rcut, one_type: bool = False):
     ntypes = max([map_ntypes, data_ntypes])
 
     neistat = NeighborStat(ntypes, rcut, one_type=one_type)
+    try:
 
-    min_nbor_dist, max_nbor_size = neistat.get_stat(train_data)
+        min_nbor_dist, max_nbor_size = neistat.get_stat(train_data)
+    except:
+        from IPython import embed
+        embed()
 
     # moved from traier.py as duplicated
     # TODO: this is a simple fix but we should have a clear

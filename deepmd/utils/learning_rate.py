@@ -37,6 +37,7 @@ class LearningRateExp(object):
         stop_lr: float = 5e-8,
         decay_steps: int = 5000,
         decay_rate: float = 0.95,
+        warm_up_num: int = 0,
     ) -> None:
         """
         Constructor
@@ -46,6 +47,8 @@ class LearningRateExp(object):
         self.cd["stop_lr"] = stop_lr
         self.cd["decay_steps"] = decay_steps
         self.cd["decay_rate"] = decay_rate
+        self.warm_up = warm_up_num > 0
+        self.warm_up_num = warm_up_num
         self.start_lr_ = self.cd["start_lr"]
 
     def build(self, global_step: tf.Tensor, stop_step: int = None) -> tf.Tensor:
@@ -83,17 +86,37 @@ class LearningRateExp(object):
             )
             if self.decay_steps_ >= stop_step:
                 self.decay_steps_ = default_ds
+            if self.warm_up:
+                stop_step -= self.warm_up_num
+                if stop_step <=0:
+                    stop_step = 100
             self.decay_rate_ = np.exp(
                 np.log(self.stop_lr_ / self.start_lr_) / (stop_step / self.decay_steps_)
             )
-
-        return tf.train.exponential_decay(
-            self.start_lr_,
-            global_step,
-            self.decay_steps_,
-            self.decay_rate_,
-            staircase=True,
-        )
+        if not self.warm_up:
+            return tf.train.exponential_decay(
+                self.start_lr_,
+                global_step,
+                self.decay_steps_,
+                self.decay_rate_,
+                staircase=True,
+            )
+        else:
+            lr_warmup = tf.train.polynomial_decay(
+                self.stop_lr_,
+                global_step,
+                self.warm_up_num,
+                end_learning_rate=self.start_lr_,
+                power=1.0
+            )
+            lr_decay = tf.train.exponential_decay(
+                self.start_lr_,
+                global_step - self.warm_up_num,
+                self.decay_steps_,
+                self.decay_rate_,
+                staircase=True,
+            )
+            return tf.cond(global_step <= self.warm_up_num, lambda: lr_warmup, lambda: lr_decay)
 
     def start_lr(self) -> float:
         """

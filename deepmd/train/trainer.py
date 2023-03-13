@@ -92,7 +92,8 @@ from deepmd.nvnmd.utils.config import (
     nvnmd_cfg,
 )
 
-# import wandb as wb
+import wandb as wb
+from IPython import embed
 
 
 def _is_subdir(path, directory):
@@ -144,7 +145,7 @@ class DPTrainer(object):
         except KeyError:
             raise KeyError("the type of descriptor should be set by `type`")
 
-        explicit_ntypes_descrpt = ["se_atten"]
+        explicit_ntypes_descrpt = ["se_atten", "gaussian"]
         hybrid_with_tebd = False
         if descrpt_param["type"] in explicit_ntypes_descrpt:
             descrpt_param["ntypes"] = len(model_param["type_map"])
@@ -154,8 +155,11 @@ class DPTrainer(object):
                     descrpt_item["ntypes"] = len(model_param["type_map"])
                     hybrid_with_tebd = True
         if self.use_backbone:
-            assert self.descrpt_type in ["se_atten"], "backbones only support se_atten descriptor!"
+            assert self.descrpt_type in ["se_atten", "gaussian"], "backbones only support se_atten, gaussian descriptor!"
             descrpt_param["return_G"] = True
+            if self.descrpt_type in ["gaussian"]:
+                assert typeebd_param is not None
+                descrpt_param["tebd_size"] = typeebd_param["neuron"][-1]
         elif self.multi_task_mode:
             descrpt_param["multi_task"] = True
         self.descrpt = Descriptor(**descrpt_param)
@@ -321,7 +325,7 @@ class DPTrainer(object):
         lr_type = lr_param.get("type", "exp")
         if lr_type == "exp":
             self.lr = LearningRateExp(
-                lr_param["start_lr"], lr_param["stop_lr"], lr_param["decay_steps"]
+                lr_param["start_lr"], lr_param["stop_lr"], lr_param["decay_steps"], warm_up_num = lr_param["warm_up"]
             )
         else:
             raise RuntimeError("unknown learning_rate type " + lr_type)
@@ -434,9 +438,9 @@ class DPTrainer(object):
         self.tensorboard_log_dir = tr_data.get("tensorboard_log_dir", "log")
         self.tensorboard_freq = tr_data.get("tensorboard_freq", 1)
         self.mixed_prec = tr_data.get("mixed_precision", None)
-        # name_path = os.path.abspath('.').split('/')
-        # wb.init(project="DPA", entity="dp_model_engineering", config=model_param,
-        #         name=name_path[-2] + '/' + name_path[-1], settings=wb.Settings(start_method="fork"))
+        name_path = os.path.abspath('.').split('/')
+        wb.init(project="DPA", entity="dp_model_engineering", config=model_param,
+                name=name_path[-2] + '/' + name_path[-1], settings=wb.Settings(start_method="fork"))
         if self.mixed_prec is not None:
             if (
                 self.mixed_prec["compute_prec"] not in ("float16", "bfloat16")
@@ -936,28 +940,30 @@ class DPTrainer(object):
                 )
                 tb_train_writer.add_summary(summary, cur_batch)
             else:
-                # coord_output, \
-                # coord_hat, \
-                # type_output, \
-                # type_hat,\
-                # noise_mask,\
-                # token_mask,\
-                # l2_more,\
-                # loss \
+                # debug_clean_coord, \
+                # debug_clean_atype, \
+                # debug_noise_mask, \
+                # debug_token_mask, \
+                # debug_preop_coord,\
+                # debug_preop_atype,\
+                # debug_preop_natoms,\
+                # debug_preop_box\
                 #     = run_sess(
                 #     self.sess,
-                #     [self.loss.coord_output,
-                #      self.loss.coord_hat,
-                #      self.loss.type_output,
-                #      self.loss.type_hat,
-                #      self.loss.noise_mask,
-                #      self.loss.token_mask,
-                #      self.loss.l2_more,
-                #      self.loss.loss],
+                #     [self.model.descrpt.debug_clean_coord,
+                #      self.model.descrpt.debug_clean_atype,
+                #      self.model.descrpt.debug_noise_mask,
+                #      self.model.descrpt.debug_token_mask,
+                #      self.model.descrpt.debug_preop_coord,
+                #      self.model.descrpt.debug_preop_atype,
+                #      self.model.descrpt.debug_preop_natoms,
+                #      self.model.descrpt.debug_preop_box,
+                #      ],
                 #     feed_dict=train_feed_dict,
                 #     options=prf_options,
                 #     run_metadata=prf_run_metadata,
                 # )
+                # embed()
                 run_sess(
                     self.sess,
                     [batch_train_op],
@@ -1185,28 +1191,28 @@ class DPTrainer(object):
     def valid_on_the_fly(self, fp, train_batches, valid_batches, print_header=False):
         train_results = self.get_evaluation_results(train_batches)
         valid_results = self.get_evaluation_results(valid_batches)
-        # train_logs = {}
-        # valid_logs = {}
-        # if not self.multi_task_mode:
-        #     for k, v in train_results.items():
-        #         train_logs[k + '_train'] = v
-        #     wb.log(train_logs, step=self.cur_batch)
-        #     for k, v in valid_results.items():
-        #         valid_logs[k + '_valid'] = v
-        #     wb.log(valid_logs, step=self.cur_batch)
-        # else:
-        #     for item in train_results:
-        #         for k, v in train_results[item].items():
-        #             train_logs[k + '_train'] = v
-        #     wb.log(train_logs, step=self.cur_batch)
-        #     for item in valid_results:
-        #         for k, v in valid_results[item].items():
-        #             valid_logs[k + '_valid'] = v
-        #     wb.log(valid_logs, step=self.cur_batch)
+        train_logs = {}
+        valid_logs = {}
+        if not self.multi_task_mode:
+            for k, v in train_results.items():
+                train_logs[k + '_train'] = v
+            wb.log(train_logs, step=self.cur_batch)
+            for k, v in valid_results.items():
+                valid_logs[k + '_valid'] = v
+            wb.log(valid_logs, step=self.cur_batch)
+        else:
+            for item in train_results:
+                for k, v in train_results[item].items():
+                    train_logs[k + '_train'] = v
+            wb.log(train_logs, step=self.cur_batch)
+            for item in valid_results:
+                for k, v in valid_results[item].items():
+                    valid_logs[k + '_valid'] = v
+            wb.log(valid_logs, step=self.cur_batch)
 
         cur_batch = self.cur_batch
         current_lr = run_sess(self.sess, self.learning_rate)
-        # wb.log({'lr': current_lr}, step=self.cur_batch)
+        wb.log({'lr': current_lr}, step=self.cur_batch)
         if print_header:
             self.print_header(fp, train_results, valid_results, self.multi_task_mode)
         self.print_on_training(

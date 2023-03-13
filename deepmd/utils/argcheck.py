@@ -421,6 +421,34 @@ def descrpt_se_a_mask_args():
     ]
 
 
+@descrpt_args_plugin.register("gaussian")
+def descrpt_gaussian_args():
+    doc_sel = 'This parameter set the number of selected neighbors for each type of atom. It can be:\n\n\
+    - `List[int]`. The length of the list should be the same as the number of atom types in the system. `sel[i]` gives the selected number of type-i neighbors. `sel[i]` is recommended to be larger than the maximally possible number of type-i neighbors in the cut-off radius. It is noted that the total sel value must be less than 4096 in a GPU environment.\n\n\
+    - `str`. Can be "auto:factor" or "auto". "factor" is a float number larger than 1. This option will automatically determine the `sel`. In detail it counts the maximal number of neighbors with in the cutoff radius for each type of neighbor, then multiply the maximum by the "factor". Finally the number is wraped up to 4 divisible. The option "auto" is equivalent to "auto:1.1".'
+    doc_rcut = "The cut-off radius."
+    doc_rcut_smth = "Where to start smoothing. For example the 1/r term is smoothed from `rcut` to `rcut_smth`"
+    doc_kernel_num = "Number of kernels"
+    doc_precision = f"The precision of the embedding net parameters, supported options are {list_to_doc(PRECISION_DICT.keys())} Default follows the interface precision."
+    doc_trainable = "If the parameters in the embedding net is trainable"
+    doc_seed = "Random seed for parameter initialization"
+
+    return [
+        Argument("sel", int, optional=True, default=120, doc=doc_sel),
+        Argument("rcut", float, optional=True, default=6.0, doc=doc_rcut),
+        Argument("rcut_smth", float, optional=True, default=0.5, doc=doc_rcut_smth),
+        Argument(
+            "kernel_num",
+            int,
+            optional=True,
+            default=128,
+            doc=doc_kernel_num,
+        ),
+        Argument("precision", str, optional=True, default="default", doc=doc_precision),
+        Argument("trainable", bool, optional=True, default=True, doc=doc_trainable),
+        Argument("seed", [int, None], optional=True, doc=doc_seed),
+    ]
+
 def descrpt_variant_type_args(exclude_hybrid: bool = False) -> Variant:
     link_lf = make_link("loc_frame", "model/descriptor[loc_frame]")
     link_se_e2_a = make_link("se_e2_a", "model/descriptor[se_e2_a]")
@@ -429,6 +457,7 @@ def descrpt_variant_type_args(exclude_hybrid: bool = False) -> Variant:
     link_se_a_tpe = make_link("se_a_tpe", "model/descriptor[se_a_tpe]")
     link_hybrid = make_link("hybrid", "model/descriptor[hybrid]")
     link_se_atten = make_link("se_atten", "model/descriptor[se_atten]")
+    link_gaussian = make_link("gaussian", "model/descriptor[gaussian]")
     doc_descrpt_type = "The type of the descritpor. See explanation below. \n\n\
 - `loc_frame`: Defines a local frame at each atom, and the compute the descriptor as local coordinates under this frame.\n\n\
 - `se_e2_a`: Used by the smooth edition of Deep Potential. The full relative coordinates are used to construct the descriptor.\n\n\
@@ -888,6 +917,7 @@ def model_args():
 #  --- Learning rate configurations: --- #
 def learning_rate_exp():
     doc_start_lr = "The learning rate the start of the training."
+    doc_warm_up = "The num of steps to use learning rate warmup."
     doc_stop_lr = "The desired learning rate at the end of the training."
     doc_decay_steps = (
         "The learning rate is decaying every this number of training steps."
@@ -897,6 +927,7 @@ def learning_rate_exp():
         Argument("start_lr", float, optional=True, default=1e-3, doc=doc_start_lr),
         Argument("stop_lr", float, optional=True, default=1e-8, doc=doc_stop_lr),
         Argument("decay_steps", int, optional=True, default=5000, doc=doc_decay_steps),
+        Argument("warm_up", int, optional=True, default=0, doc=doc_warm_up),
     ]
     return args
 

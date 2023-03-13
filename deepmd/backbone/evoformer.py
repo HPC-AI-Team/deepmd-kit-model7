@@ -66,8 +66,8 @@ class EvoformerBackbone (Backbone):
                  uniform_seed: bool = False
                  ) -> None:
         self.ntypes = descrpt.get_ntypes()
-        self.dim_embd = descrpt.get_dim_rot_mat_1()
-        self.dim_descrpt = descrpt.get_dim_out()
+        # self.dim_embd = descrpt.get_dim_rot_mat_1()
+        self.kernel_num = descrpt.get_kernel_num()
         self.evo_layer = evo_layer
         self.attn_head = attn_head
         self.feature_dim = feature_dim
@@ -115,6 +115,7 @@ class EvoformerBackbone (Backbone):
               suffix: str = '',
               ):
         type_embedding = input_dict.get('type_embedding', None)  # ntypes x 8
+        tebd_size = type_embedding.shape[-1]
         atype = input_dict.get('atype', None)
         assert type_embedding is not None and atype is not None, "type_embedding and atype must be transfered to this backbone!"
         atype_nall = tf.reshape(atype, [-1, natoms[1]])
@@ -131,8 +132,8 @@ class EvoformerBackbone (Backbone):
         # (nframes x nloc) x 1
         self.masked_nnei = tf.reduce_sum(self.namsk_nnei, axis=-1, keepdims=True)
         self.rij = tf.reshape(input_dict['rij'], [nframes * nloc, nnei, 3])
-        inputs = tf.reshape(inputs, [nframes * nloc, self.dim_descrpt])  # (nframes x nloc) x (M1 x M2)
-        environ_G = tf.reshape(environ_G, [nframes * nloc * nnei, self.dim_embd])  # (nframes x nloc x nnei) x M1
+        inputs = tf.reshape(inputs, [nframes * nloc, tebd_size])  # (nframes x nloc) x tebd_size
+        environ_G = tf.reshape(environ_G, [nframes * nloc * nnei, self.kernel_num])  # (nframes x nloc x nnei) x K
         self.nmask = tf.reshape(
             tf.tile(
                 tf.reshape(
@@ -148,12 +149,12 @@ class EvoformerBackbone (Backbone):
         extra_layer_norm = 0
         extra_head_layer_norm = 0
 
-        # Global branch
-        atype_embed = tf.nn.embedding_lookup(type_embedding, self.atype_nloc)  # (nframes x nloc) x 8
-        inputs = tf.concat(
-            [inputs, atype_embed],
-            axis=1
-        )  # (nframes x nloc) x (M1 x M2 + 8)
+        # # Global branch
+        # atype_embed = tf.nn.embedding_lookup(type_embedding, self.atype_nloc)  # (nframes x nloc) x 8
+        # inputs = tf.concat(
+        #     [inputs, atype_embed],
+        #     axis=1
+        # )  # (nframes x nloc) x (M1 x M2 + 8)
         name = 'backbone_layer' + suffix
         with tf.variable_scope(name, reuse=reuse):
             atomic_rep = one_layer(
