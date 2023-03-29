@@ -68,6 +68,7 @@ class EvoformerBackbone (Backbone):
         self.ntypes = descrpt.get_ntypes()
         # self.dim_embd = descrpt.get_dim_rot_mat_1()
         self.kernel_num = descrpt.get_kernel_num()
+        self.atomic_dim = descrpt.get_dim_out()
         self.evo_layer = evo_layer
         self.attn_head = attn_head
         self.feature_dim = feature_dim
@@ -115,7 +116,7 @@ class EvoformerBackbone (Backbone):
               suffix: str = '',
               ):
         type_embedding = input_dict.get('type_embedding', None)  # ntypes x 8
-        tebd_size = type_embedding.shape[-1]
+        # tebd_size = type_embedding.shape[-1]
         atype = input_dict.get('atype', None)
         assert type_embedding is not None and atype is not None, "type_embedding and atype must be transfered to this backbone!"
         atype_nall = tf.reshape(atype, [-1, natoms[1]])
@@ -132,7 +133,7 @@ class EvoformerBackbone (Backbone):
         # (nframes x nloc) x 1
         self.masked_nnei = tf.reduce_sum(self.namsk_nnei, axis=-1, keepdims=True)
         self.rij = tf.reshape(input_dict['rij'], [nframes * nloc, nnei, 3])
-        inputs = tf.reshape(inputs, [nframes * nloc, tebd_size])  # (nframes x nloc) x tebd_size
+        inputs = tf.reshape(inputs, [nframes * nloc, self.atomic_dim])  # (nframes x nloc) x atomic_dim
         environ_G = tf.reshape(environ_G, [nframes * nloc * nnei, self.kernel_num])  # (nframes x nloc x nnei) x K
         self.nmask = tf.reshape(
             tf.tile(
@@ -158,7 +159,7 @@ class EvoformerBackbone (Backbone):
         name = 'backbone_layer' + suffix
         with tf.variable_scope(name, reuse=reuse):
             atomic_rep = one_layer(
-                        inputs,
+                        inputs * 10000,
                         self.feature_dim,
                         name='atomic_trans',
                         scope=name + '/',
@@ -170,6 +171,8 @@ class EvoformerBackbone (Backbone):
                         uniform_seed=self.uniform_seed,
                         initial_variables=self.backbone_variables)  # (nframes x nloc) x d
             if self.emb_layer_norm:
+                from IPython import embed
+                embed()
                 atomic_rep = tf.keras.layers.LayerNormalization(
                     beta_initializer=tf.constant_initializer(self.beta[self.evo_layer * 2 + extra_layer_norm]),
                     gamma_initializer=tf.constant_initializer(self.gamma[self.evo_layer * 2 + extra_layer_norm]),
@@ -209,6 +212,19 @@ class EvoformerBackbone (Backbone):
         # input_atomic_rep = atomic_rep
         # pair_rep = pair_rep + self.negative_mask
         pair_rep = self.mask_fill(pair_rep, self.nmask, -(2 << 32))
+        self.in_atomic_rep = atomic_rep
+        self.in_pair_rep = pair_rep
+        self.out_layer_q = []
+        self.out_layer_k = []
+        self.out_layer_v = []
+        self.out_layer_attn_weights_before = []
+        self.out_layer_attn_weights_after = []
+        self.out_layer_attn_weights_after_softmax = []
+        self.out_layer_o = []
+        self.out_layer_pair_rep = []
+        self.evo_layer_atomic_rep = []
+        self.evo_layer_pair_rep = []
+
         for i in range(self.evo_layer):
             name_layer = 'evo_layer_{}{}'.format(i, suffix)
             with tf.variable_scope(name_layer, reuse=reuse):
@@ -224,7 +240,8 @@ class EvoformerBackbone (Backbone):
                     scope=name_layer,
                     reuse=reuse,
                 )
-
+                self.evo_layer_atomic_rep.append(atomic_rep)
+                self.evo_layer_pair_rep.append(pair_rep)
         # atomic_rep : (nframes x nloc) x d
         # pair_rep : (nframes x h x nloc) x 1 x nnei
         # TODO norm loss of atomic_rep, no need of mask
@@ -238,8 +255,11 @@ class EvoformerBackbone (Backbone):
 
         # 1 : use delta_pair_rep
         # (nframes x h x nloc) x 1 x nnei
+        self.out_pair_rep = pair_rep
         delta_pair_rep = pair_rep - input_pair_rep
+        self.out_delta_pair_rep = delta_pair_rep
         delta_pair_rep = self.mask_fill(delta_pair_rep, self.nmask, 0.0)
+        self.out_delta_pair_rep_fill0 = delta_pair_rep
         # (nframes x nloc x nnei) x h
         delta_pair_rep = tf.reshape(
             tf.transpose(
@@ -252,6 +272,7 @@ class EvoformerBackbone (Backbone):
             [nframes * nloc * nnei, self.attn_head],
         )
 
+        self.delta_pair_rep_before_ln = delta_pair_rep
         # TODO norm loss of delta_pair_rep, need mask
         norm_delta_pair_rep = self.norm_loss(delta_pair_rep)
         norm_delta_pair_rep = tf.reshape(norm_delta_pair_rep, [nframes * nloc, nnei])
@@ -264,6 +285,7 @@ class EvoformerBackbone (Backbone):
             )(delta_pair_rep)
             extra_head_layer_norm += 1
 
+        self.delta_pair_rep_after_ln = delta_pair_rep
         # TODO 2 : use delta_G
 
         # encoder_pair_rep[encoder_pair_rep == float("-inf")] = 0 ?
@@ -297,6 +319,7 @@ class EvoformerBackbone (Backbone):
         )
         # (nframes x nloc) x 1 x nnei
         attn_probs = tf.reshape(attn_probs, [nframes * nloc, 1, nnei])
+        self.attn_probs = attn_probs
         # (nframes x nloc) x 1 x 3
         coord_update = tf.matmul(attn_probs, self.rij)
         # (nframes x nloc) x 3
@@ -449,6 +472,7 @@ class EvoformerBackbone (Backbone):
             ),
             [nframes * self.attn_head * nloc, 1, self.head_dim],
         ) * self.scaling
+        self.out_layer_q.append(q)
         # padding for blank neighbors
         # nframes x 1 x d
         padding = tf.cast(tf.zeros([nframes, 1, self.feature_dim]), self.backbone_precision)
@@ -472,6 +496,7 @@ class EvoformerBackbone (Backbone):
             ),
             [nframes * self.attn_head * nloc, nnei, self.head_dim],
         )
+        self.out_layer_k.append(k)
         # (nframes x h x nloc) x nnei x d1
         v = tf.reshape(
             tf.transpose(
@@ -486,17 +511,23 @@ class EvoformerBackbone (Backbone):
             ),
             [nframes * self.attn_head * nloc, nnei, self.head_dim],
         )
+        self.out_layer_v.append(v)
         # (nframes x h x nloc) x 1 x nnei
         attn_weights = tf.matmul(q, k, transpose_b=True)
         # attn_weights += self.negative_mask
         attn_weights = self.mask_fill(attn_weights, self.nmask, -(2 << 32))
+        self.out_layer_attn_weights_before.append(attn_weights)
 
         if return_attn:
             attn_weights += attn_bias
+        self.out_layer_pair_rep.append(attn_bias)
+        self.out_layer_attn_weights_after.append(attn_weights)
 
         # softmax
         # (nframes x h x nloc) x 1 x nnei
         attn = tf.nn.softmax(attn_weights, axis=-1)
+        self.out_layer_attn_weights_after_softmax.append(attn)
+        # attn = attn_weights
         # (nframes x h x nloc) x 1 x d1
         o = tf.matmul(attn, v)
         # (nframes x nloc) x (h x d1)
@@ -510,6 +541,7 @@ class EvoformerBackbone (Backbone):
             ),
             [nframes * nloc, self.attn_head * self.head_dim],
         )
+        self.out_layer_o.append(o)
         if not return_attn:
             return o
         else:

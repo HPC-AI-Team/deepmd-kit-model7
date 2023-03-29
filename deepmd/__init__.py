@@ -13,6 +13,7 @@ from . import (
     cluster,
     descriptor,
     fit,
+    backbone,
     loss,
     nvnmd,
     utils,
@@ -48,6 +49,7 @@ for ep in eps:
 __all__ = [
     "descriptor",
     "fit",
+    "backbone",
     "loss",
     "utils",
     "cluster",

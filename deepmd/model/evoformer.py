@@ -171,21 +171,21 @@ class EvoformerModel(Model):
             suffix=suffix,
             reuse=reuse)
 
-        atomic_rep, pair_rep, coord_update, logits, norm_x, norm_delta_pair_rep = self.backbone.build(self.atomic_rep,
+        self.atomic_rep_out, self.pair_rep_out, self.coord_update, self.logits, self.norm_x, self.norm_delta_pair_rep = self.backbone.build(self.atomic_rep,
                                                                                                       self.pair_rep,
                                                                                                       natoms,
                                                                                                       input_dict,
                                                                                                       reuse=reuse,
                                                                                                       suffix=suffix)
-        coord_output = coord + tf.reshape(coord_update, [-1, natoms[0] * 3])
+        self.coord_output = coord + tf.reshape(self.coord_update, [-1, natoms[0] * 3])
 
         model_dict = {}
         model_dict['coord'] = coord
-        model_dict['coord_output'] = coord_output
+        model_dict['coord_output'] = self.coord_output
         model_dict['atype'] = atype
-        model_dict['logits'] = logits
-        model_dict['norm_x'] = norm_x
-        model_dict['norm_delta_pair_rep'] = norm_delta_pair_rep
+        model_dict['logits'] = self.logits
+        model_dict['norm_x'] = self.norm_x
+        model_dict['norm_delta_pair_rep'] = self.norm_delta_pair_rep
 
         return model_dict
 

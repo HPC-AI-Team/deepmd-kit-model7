@@ -429,6 +429,7 @@ class DPTrainer(object):
             self.noise_type = tr_data.get("noise_type", "uniform")
             self.coord_noise_num = tr_data.get("coord_noise_num", 10)
             self.masked_token_num = tr_data.get("masked_token_num", 10)
+            self.mask_mode = tr_data.get("coord_mask_mode", '')
             self.same_mask = tr_data.get("same_mask", False)
             self._min_dist_sub_graph()
         self.profiling = self.run_opt.is_chief and tr_data.get("profiling", False)
@@ -940,29 +941,15 @@ class DPTrainer(object):
                 )
                 tb_train_writer.add_summary(summary, cur_batch)
             else:
-                # debug_clean_coord, \
-                # debug_clean_atype, \
-                # debug_noise_mask, \
-                # debug_token_mask, \
-                # debug_preop_coord,\
-                # debug_preop_atype,\
-                # debug_preop_natoms,\
-                # debug_preop_box\
-                #     = run_sess(
+                # descrpt_debug_keys = sorted(list(self.model.descrpt.debug_dict.keys()))
+                # debug_out = run_sess(
                 #     self.sess,
-                #     [self.model.descrpt.debug_clean_coord,
-                #      self.model.descrpt.debug_clean_atype,
-                #      self.model.descrpt.debug_noise_mask,
-                #      self.model.descrpt.debug_token_mask,
-                #      self.model.descrpt.debug_preop_coord,
-                #      self.model.descrpt.debug_preop_atype,
-                #      self.model.descrpt.debug_preop_natoms,
-                #      self.model.descrpt.debug_preop_box,
-                #      ],
+                #     [self.model.descrpt.debug_dict[item_key] for item_key in descrpt_debug_keys],
                 #     feed_dict=train_feed_dict,
                 #     options=prf_options,
                 #     run_metadata=prf_run_metadata,
                 # )
+                # descrpt_debug_out_dict = {item_key: debug_out[i] for i, item_key in enumerate(descrpt_debug_keys)}
                 # embed()
                 run_sess(
                     self.sess,
@@ -1086,7 +1073,9 @@ class DPTrainer(object):
                 shutil.copyfile(ori_ff, new_ff)
         log.info("saved checkpoint %s" % self.save_ckpt)
 
-    def get_feed_dict(self, batch, is_training):
+    def get_feed_dict(self, batch, is_training, noise_dict=None, mask_mode=''):
+        if self.mask_mode != '':
+            mask_mode = self.mask_mode
         feed_dict = {}
         for kk in batch.keys():
             if kk == "find_type" or kk == "type" or kk == "real_natoms_vec":
@@ -1117,10 +1106,12 @@ class DPTrainer(object):
                 batch,
                 _coord_noise_num=self.coord_noise_num,
                 _masked_token_num=self.masked_token_num,
+                noise_dict=noise_dict,
+                mask_mode=mask_mode,
             )
         return feed_dict
 
-    def add_noise_mask(self, _clean_coord, _clean_type, _batch, _coord_noise_num=10, _masked_token_num=10):
+    def add_noise_mask(self, _clean_coord, _clean_type, _batch, _coord_noise_num=10, _masked_token_num=10, noise_dict=None, mask_mode=''):
         natom = _batch["natoms_vec"][1]
         box = _batch["box"].reshape([-1, 9])
         natoms_vec = _batch["natoms_vec"]
@@ -1128,18 +1119,35 @@ class DPTrainer(object):
         _clean_coord = _clean_coord.reshape([-1, natom * 3])
         _clean_type = _clean_type.reshape([-1, natom])
         nframes = _clean_coord.shape[0]
-        coord_noise_num = _coord_noise_num if _coord_noise_num < natom else natom
-        noise_idx = np.random.choice(natom, coord_noise_num, replace=False)
-        noise_mask = np.full(natom, False)
-        noise_mask[noise_idx] = True
+        if noise_dict is None:
+            if mask_mode not in ['nloc_mask_3x3']:
+                coord_noise_num = _coord_noise_num if _coord_noise_num < natom else natom
+                noise_idx = np.random.choice(natom, coord_noise_num, replace=False)
+                noise_mask = np.full(natom, False)
+                noise_mask[noise_idx] = True
+            else:
+                if mask_mode == 'nloc_mask_3x3':
+                    noise_mask = np.full(natom, False)
+                    assert natom % 27 == 0, 'natom not in 3x3 copy mode!'
+                    nloc_natom = int(natom / 27)
+                    noise_mask[:nloc_natom] = True
+        else:
+            noise_idx = noise_dict['noise_idx'] if "noise_idx" in noise_dict else 0
+            noise_mask = np.full(natom, False)
+            noise_mask[noise_idx] = True
 
-        if not self.same_mask:
-            masked_token_num = _masked_token_num if _masked_token_num < natom else natom
-            token_idx = np.random.choice(natom, masked_token_num, replace=False)
+        if noise_dict is None:
+            if not self.same_mask:
+                masked_token_num = _masked_token_num if _masked_token_num < natom else natom
+                token_idx = np.random.choice(natom, masked_token_num, replace=False)
+                token_mask = np.full(natom, False)
+                token_mask[token_idx] = True
+            else:
+                token_mask = noise_mask
+        else:
+            token_idx = noise_dict['token_idx'] if "token_idx" in noise_dict else 0
             token_mask = np.full(natom, False)
             token_mask[token_idx] = True
-        else:
-            token_mask = noise_mask
 
         def add_noise(__clean_coord, _noise_mask):
             noise_c = None
@@ -1163,18 +1171,24 @@ class DPTrainer(object):
 
         temp_type = _clean_type.copy()
         temp_type[:, token_mask] = self.model.ntypes - 1  # masked type
-        while True:
-            temp_coord = add_noise(_clean_coord, noise_mask)
-            temp_feed_dict = {}
-            temp_feed_dict[self.place_holders_temp["coord"]] = temp_coord
-            temp_feed_dict[self.place_holders_temp["box"]] = box
-            temp_feed_dict[self.place_holders_temp["type"]] = temp_type
-            temp_feed_dict[self.place_holders_temp["natoms_vec"]] = natoms_vec
-            temp_feed_dict[self.place_holders_temp["default_mesh"]] = default_mesh
-            temp_min_nbor_dist = run_sess(self.sub_sess, [self.temp_min_nbor_dist], feed_dict=temp_feed_dict)[0]
-            if not math.isclose(temp_min_nbor_dist.min(), 0.0, rel_tol=1e-6):
-                return temp_coord.reshape(-1), temp_type.reshape(-1), \
-                       noise_mask.astype(GLOBAL_NP_FLOAT_PRECISION), token_mask.astype(GLOBAL_NP_FLOAT_PRECISION)
+        if noise_dict is None:
+            while True:
+                temp_coord = add_noise(_clean_coord, noise_mask)
+                temp_feed_dict = {}
+                temp_feed_dict[self.place_holders_temp["coord"]] = temp_coord
+                temp_feed_dict[self.place_holders_temp["box"]] = box
+                temp_feed_dict[self.place_holders_temp["type"]] = temp_type
+                temp_feed_dict[self.place_holders_temp["natoms_vec"]] = natoms_vec
+                temp_feed_dict[self.place_holders_temp["default_mesh"]] = default_mesh
+                temp_min_nbor_dist = run_sess(self.sub_sess, [self.temp_min_nbor_dist], feed_dict=temp_feed_dict)[0]
+                if not math.isclose(temp_min_nbor_dist.min(), 0.0, rel_tol=1e-6):
+                    return temp_coord.reshape(-1), temp_type.reshape(-1), \
+                           noise_mask.astype(GLOBAL_NP_FLOAT_PRECISION), token_mask.astype(GLOBAL_NP_FLOAT_PRECISION)
+        else:
+            temp_coord = _clean_coord.reshape([-1, natom, 3]).copy()
+            temp_coord[:, noise_mask == True, :] += noise_dict['coord_noise'] if "coord_noise" in noise_dict else 0.0
+            return temp_coord.reshape(-1), temp_type.reshape(-1), \
+                   noise_mask.astype(GLOBAL_NP_FLOAT_PRECISION), token_mask.astype(GLOBAL_NP_FLOAT_PRECISION)
 
     def get_global_step(self):
         return run_sess(self.sess, self.global_step)

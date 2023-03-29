@@ -55,10 +55,14 @@ from .descriptor import (
     Descriptor,
 )
 
+from .se_atten import (
+    DescrptSeAtten
+)
+
 from IPython import embed
 
 @Descriptor.register("gaussian")
-class DescrptGaussian(Descriptor, ABC):
+class DescrptGaussian(DescrptSeAtten):
     """
     Parameters
     ----------
@@ -86,12 +90,25 @@ class DescrptGaussian(Descriptor, ABC):
         rcut_smth: float,
         sel: int,
         ntypes: int,
+        neuron: List[int] = [24, 48, 96],
+        axis_neuron: int = 8,
+        resnet_dt: bool = False,
+        type_one_side: bool = True,
+        exclude_types: List[List[int]] = [],
+        set_davg_zero: bool = False,
+        activation_function: str = "tanh",
+        attn: int = 128,
+        attn_layer: int = 2,
+        attn_dotr: bool = True,
+        attn_mask: bool = False,
         kernel_num: int = 128,
         tebd_size: int = 8,
         trainable: bool = True,
         seed: Optional[int] = None,
         precision: str = "default",
         uniform_seed: bool = False,
+        use_D: bool = True,
+        use_G: bool = True,
         return_G: bool = False,
     ) -> None:
         """
@@ -100,44 +117,45 @@ class DescrptGaussian(Descriptor, ABC):
         assert Version(TF_VERSION) > Version(
             "2"
         ), "gaussian descriptor only supports tensorflow version 2.0 or higher."
-        self.sel_a = [sel]
-        self.rcut_r = rcut
-        self.rcut_r_smth = rcut_smth
-        self.seed = seed
-        self.uniform_seed = uniform_seed
-        self.trainable = trainable
-        self.filter_precision = get_precision(precision)
-        self.kernel_num = kernel_num
+        DescrptSeAtten.__init__(
+                self,
+                rcut=rcut,
+                rcut_smth=rcut_smth,
+                sel=sel,
+                ntypes=ntypes,
+                neuron=neuron,
+                axis_neuron=axis_neuron,
+                resnet_dt=resnet_dt,
+                trainable=trainable,
+                seed=seed,
+                type_one_side=type_one_side,
+                exclude_types=exclude_types,
+                set_davg_zero=set_davg_zero,
+                activation_function=activation_function,
+                precision=precision,
+                uniform_seed=uniform_seed,
+                attn=attn,
+                attn_layer=attn_layer,
+                attn_dotr=attn_dotr,
+                attn_mask=attn_mask,
+                return_G=return_G)
+        self.use_D = use_D
+        self.use_G = use_G
         self.tebd_size = tebd_size
-
-        # descrpt config
-        self.sel_r = [0]
-        self.rcut_a = -1
-        # numb of neighbors and numb of descrptors
-        self.nnei_a = np.cumsum(self.sel_a)[-1]
-        self.nnei_r = np.cumsum(self.sel_r)[-1]
-        self.nnei = self.nnei_a + self.nnei_r
-        self.ndescrpt_a = self.nnei_a * 4
-        self.ndescrpt_r = self.nnei_r * 1
-        self.ndescrpt = self.ndescrpt_a + self.ndescrpt_r
-        self.dstd = None
-        self.davg = None
-        self.embedding_net_variables = None
-        self.mixed_prec = None
-        self.place_holders = {}
-        self.original_sel = None
-        self.ntypes = ntypes
-        self.return_G = return_G
+        self.G_dim = self.get_dim_rot_mat_1()
+        self.D_dim = self.get_dim_out()
+        self.kernel_num = kernel_num
+        self.start_mean = 0.0
+        self.stop_mean = 9.0
+        self.std_width = 1.0
+        if use_G:
+            self.kernel_num = self.G_dim
         # affine transformation
         self.mul = np.ones([self.ntypes * (self.ntypes + 1), 1])
         self.bias = np.zeros([self.ntypes * (self.ntypes + 1), 1])
         # gaussian kernels
         self.means = None
         self.stds = None
-
-        # descrpt config
-        self.sel_all_a = [sel]
-        self.sel_all_r = [0]
 
     def compute_input_stats(
         self,
@@ -150,7 +168,17 @@ class DescrptGaussian(Descriptor, ABC):
         mixed_type: bool = False,
         real_natoms_vec: Optional[list] = None,
     ) -> None:
-        pass
+        if self.use_D or self.use_G:
+            super().compute_input_stats(
+                data_coord=data_coord,
+                data_box=data_box,
+                data_atype=data_atype,
+                natoms_vec=natoms_vec,
+                mesh=mesh,
+                input_dict=input_dict,
+                mixed_type=mixed_type,
+                real_natoms_vec=real_natoms_vec,
+            )
 
     def build(
         self,
@@ -193,6 +221,7 @@ class DescrptGaussian(Descriptor, ABC):
         descriptor
             The output descriptor
         """
+        self.debug_dict = {}
         with tf.variable_scope("descrpt_attr" + suffix, reuse=reuse):
             davg = np.zeros([self.ntypes, self.ndescrpt])
             dstd = np.ones([self.ntypes, self.ndescrpt])
@@ -228,14 +257,17 @@ class DescrptGaussian(Descriptor, ABC):
             coord = tf.reshape(coord_, [-1, natoms[1] * 3])
         box = tf.reshape(box_, [-1, 9])
         atype = tf.reshape(atype_, [-1, natoms[1]])
-        # self.debug_clean_coord = input_dict['clean_coord']
-        # self.debug_clean_atype = input_dict['clean_type']
-        # self.debug_noise_mask = input_dict['noise_mask']
-        # self.debug_token_mask = input_dict['token_mask']
-        # self.debug_preop_coord = coord
-        # self.debug_preop_atype = atype
-        # self.debug_preop_natoms = natoms
-        # self.debug_preop_box = box
+        self.attn_weight = [None for i in range(self.attn_layer)]
+        self.angular_weight = [None for i in range(self.attn_layer)]
+        self.attn_weight_final = [None for i in range(self.attn_layer)]
+        self.debug_dict["clean_coord"] = input_dict['clean_coord']
+        self.debug_dict["clean_atype"] = input_dict['clean_type']
+        self.debug_dict["noise_mask"] = input_dict['noise_mask']
+        self.debug_dict["token_mask"] = input_dict['token_mask']
+        self.debug_dict["preop_coord"] = coord
+        self.debug_dict["preop_atype"] = atype
+        self.debug_dict["preop_natoms"] = natoms
+        self.debug_dict["preop_box"] = box
         (
             self.descrpt,
             self.descrpt_deriv,
@@ -261,106 +293,142 @@ class DescrptGaussian(Descriptor, ABC):
         input_dict['nlist'] = self.nlist
         input_dict['descrpt'] = self.descrpt
         input_dict['nmask'] = self.nmask
+        self.debug_dict["rij"] = self.rij
+        self.debug_dict["nlist"] = self.nlist
+        self.debug_dict["descrpt"] = self.descrpt
+        self.debug_dict["nmask"] = self.nmask
 
-        # (nframes x nloc x nnei) x 3
-        self.rij = tf.reshape(self.rij, [-1, 3])
-        # nframes x nloc x nnei x 1
-        self.dist = tf.reshape(tf.sqrt(tf.reduce_sum(tf.square(self.rij), axis=-1)), [-1, natoms[1], self.nnei, 1])
-
-        # nframes x nloc x nnei
-        # val : [0, ntypes + 1) , ntypes is the padding, ntypes - 1 is the mask
-        self.nei_type_vec = tf.reshape(self.nei_type_vec, [-1, natoms[1], self.nnei])
-        # nframes x nloc x 1
-        # val : [0, ntypes), ntypes - 1 is the mask
-        atype = tf.reshape(atype, [-1, natoms[1], 1])
-        # nframes x nloc x nnei
-        # val : [0, ntypes * (ntypes + 1) )
-        self.edge_type = atype * (self.ntypes + 1) + self.nei_type_vec
-
-        with tf.variable_scope('gaussian', reuse=reuse):
-            # init affine transformation
-            mul_initializer = tf.constant_initializer(self.mul)
-            self.t_mul = tf.get_variable(
-                        "mul",
-                        [self.ntypes * (self.ntypes + 1), 1],
-                        self.filter_precision,
-                        mul_initializer,
-                        trainable=self.trainable,
+        if self.use_D or self.use_G:
+            self.nei_type_vec = tf.reshape(self.nei_type_vec, [-1])
+            self.nmask = tf.cast(
+                tf.reshape(self.nmask, [-1, 1, self.sel_all_a[0]]),
+                self.filter_precision,
             )
-            bias_initializer = tf.constant_initializer(self.bias)
-            self.t_bias = tf.get_variable(
-                        "bias",
-                        [self.ntypes * (self.ntypes + 1), 1],
-                        self.filter_precision,
-                        bias_initializer,
-                        trainable=self.trainable,
-            )
+            self.negative_mask = -(2 << 32) * (1.0 - self.nmask)
+            # only used when tensorboard was set as true
+            tf.summary.histogram("descrpt", self.descrpt)
+            tf.summary.histogram("rij", self.rij)
+            tf.summary.histogram("nlist", self.nlist)
 
-            # init gaussian kernels
-            if self.means is None:
-                means_initializer = tf.random_uniform_initializer(
-                    minval=0.0, maxval=3.0,
-                    seed=self.seed if (self.seed is None or self.uniform_seed) else self.seed + 0,
+            self.descrpt_reshape = tf.reshape(self.descrpt, [-1, self.ndescrpt])
+            self.atype_nloc = tf.reshape(
+                tf.slice(atype, [0, 0], [-1, natoms[0]]), [-1]
+            )  ## lammps will have error without this
+            self._identity_tensors(suffix=suffix)
+
+            self.dout, self.qmat = self._pass_filter(
+                self.descrpt_reshape,
+                self.atype_nloc,
+                natoms,
+                input_dict,
+                suffix=suffix,
+                reuse=reuse,
+                trainable=self.trainable,
+            )
+            self.pair_rep = self.xyz_scatter_att
+            self.atomic_rep = self.dout
+
+        if not self.use_G:
+            # (nframes x nloc x nnei) x 3
+            self.rij = tf.reshape(self.rij, [-1, 3])
+            # nframes x nloc x nnei x 1
+            self.dist = tf.reshape(tf.sqrt(tf.reduce_sum(tf.square(self.rij), axis=-1)), [-1, natoms[1], self.nnei, 1])
+            self.debug_dict["dist"] = self.dist
+
+            # nframes x nloc x nnei
+            # val : [0, ntypes + 1) , ntypes is the padding, ntypes - 1 is the mask
+            self.nei_type_vec = tf.reshape(self.nei_type_vec, [-1, natoms[1], self.nnei])
+            # nframes x nloc x 1
+            # val : [0, ntypes), ntypes - 1 is the mask
+            atype = tf.reshape(atype, [-1, natoms[1], 1])
+            # nframes x nloc x nnei
+            # val : [0, ntypes * (ntypes + 1) )
+            self.edge_type = atype * (self.ntypes + 1) + self.nei_type_vec
+
+            with tf.variable_scope('gaussian', reuse=reuse):
+                # init affine transformation
+                mul_initializer = tf.constant_initializer(self.mul)
+                self.t_mul = tf.get_variable(
+                            "mul",
+                            [self.ntypes * (self.ntypes + 1), 1],
+                            self.filter_precision,
+                            mul_initializer,
+                            trainable=self.trainable,
                 )
-            else:
-                means_initializer = tf.constant_initializer(self.means)
-            self.t_means = tf.get_variable(
-                        "means",
-                        [1, 1, 1, self.kernel_num],
-                        self.filter_precision,
-                        means_initializer,
-                        trainable=self.trainable,
-            )
-            if self.stds is None:
-                stds_initializer = tf.random_uniform_initializer(
-                    minval=0.0, maxval=3.0,
-                    seed=self.seed if (self.seed is None or self.uniform_seed) else self.seed + 1,
+                bias_initializer = tf.constant_initializer(self.bias)
+                self.t_bias = tf.get_variable(
+                            "bias",
+                            [self.ntypes * (self.ntypes + 1), 1],
+                            self.filter_precision,
+                            bias_initializer,
+                            trainable=self.trainable,
                 )
-            else:
-                stds_initializer = tf.constant_initializer(self.stds)
-            self.t_stds = tf.get_variable(
-                        "stds",
-                        [1, 1, 1, self.kernel_num],
-                        self.filter_precision,
-                        stds_initializer,
-                        trainable=self.trainable,
-            )
-        # nframes x nloc x nnei x 1
-        self.edge_mul = tf.nn.embedding_lookup(self.t_mul, self.edge_type)
-        self.edge_bias = tf.nn.embedding_lookup(self.t_bias, self.edge_type)
 
-        # nframes x nloc x nnei x K
-        self.x = tf.tile(self.edge_mul * self.dist + self.edge_bias, [1, 1, 1, self.kernel_num])
+                # init gaussian kernels
+                if self.means is None:
+                    self.t_means = tf.cast(tf.linspace(self.start_mean, self.stop_mean, self.kernel_num), self.filter_precision)
+                else:
+                    means_initializer = tf.constant_initializer(self.means)
+                    self.t_means = tf.get_variable(
+                                "means",
+                                [1, 1, 1, self.kernel_num],
+                                self.filter_precision,
+                                means_initializer,
+                                trainable=self.trainable,
+                    )
+                if self.stds is None:
+                    self.t_stds = tf.cast(self.std_width * (self.stop_mean - self.start_mean) / (self.kernel_num - 1), self.filter_precision)
+                else:
+                    stds_initializer = tf.constant_initializer(self.stds)
+                    self.t_stds = tf.get_variable(
+                                "stds",
+                                [1, 1, 1, self.kernel_num],
+                                self.filter_precision,
+                                stds_initializer,
+                                trainable=self.trainable,
+                    )
+            # nframes x nloc x nnei x 1
+            self.edge_mul = tf.nn.embedding_lookup(self.t_mul, self.edge_type)
+            self.edge_bias = tf.nn.embedding_lookup(self.t_bias, self.edge_type)
 
-        def gaussian(x, mean, std):
-            pi = 3.14159
-            a = (2 * pi) ** 0.5
-            return tf.exp(-0.5 * (((x - mean) / std) ** 2)) / (a * std)
+            # nframes x nloc x nnei x K
+            self.x = tf.tile(self.edge_mul * self.dist + self.edge_bias, [1, 1, 1, self.kernel_num])
 
-        # self.x = gaussian(self.x, self.t_means, tf.abs(self.t_stds) + 1e-5)
-        self.x = gaussian(self.x, 0.0, 1.0)
+            def gaussian(x, mean, std):
+                pi = 3.14159
+                a = (2 * pi) ** 0.5
+                return tf.exp(-0.5 * (((x - mean) / std) ** 2)) / (a * std)
 
-        assert (
-                input_dict is not None
-                and input_dict.get("type_embedding", None) is not None
-        ), "se_atten desctiptor must use type_embedding"
-        type_embedding = input_dict.get("type_embedding", None)
+            self.x = gaussian(self.x, self.t_means, tf.abs(self.t_stds) + 1e-5)
+            # self.x = gaussian(self.x, 0.0, 1.0)
+            self.pair_rep = self.x
 
-        # nframes x nloc
-        atype = tf.reshape(atype, [-1, natoms[1]])
-        # nframes x nloc x type_size
-        self.atm_embed = tf.nn.embedding_lookup(type_embedding, atype)
+        if not self.use_D:
+            assert (
+                    input_dict is not None
+                    and input_dict.get("type_embedding", None) is not None
+            ), "se_atten desctiptor must use type_embedding"
+            type_embedding = input_dict.get("type_embedding", None)
+
+            # nframes x nloc
+            atype = tf.reshape(atype, [-1, natoms[1]])
+            # nframes x nloc x type_size
+            self.atm_embed = tf.nn.embedding_lookup(type_embedding, atype)
+            self.atomic_rep = self.atm_embed
 
         if not self.return_G:
-            return self.atm_embed
+            return self.atomic_rep
         else:
-            return self.atm_embed, self.x
+            return self.atomic_rep, self.pair_rep
 
     def get_dim_out(self) -> int:
         """
         Returns the output dimension of this descriptor
         """
-        return self.tebd_size
+        if self.use_D:
+            return self.filter_neuron[-1] * self.n_axis_neuron
+        else:
+            return self.tebd_size
 
     def get_ntypes(self) -> int:
         """
@@ -379,11 +447,6 @@ class DescrptGaussian(Descriptor, ABC):
         Returns the cut-off radius
         """
         return self.kernel_num
-
-    def prod_force_virial(
-        self, atom_ener: tf.Tensor, natoms: tf.Tensor
-    ):
-        pass
 
     def init_variables(
         self,
@@ -404,24 +467,24 @@ class DescrptGaussian(Descriptor, ABC):
             The suffix of the scope
         """
         super().init_variables(graph=graph, graph_def=graph_def, suffix=suffix)
-        self.attention_layer_variables = get_attention_layer_variables_from_graph_def(
-            graph_def, suffix=suffix
-        )
-        if self.attn_layer > 0:
-            self.beta[0] = self.attention_layer_variables[
-                "attention_layer_0{}/layer_normalization/beta".format(suffix)
-            ]
-            self.gamma[0] = self.attention_layer_variables[
-                "attention_layer_0{}/layer_normalization/gamma".format(suffix)
-            ]
-            for i in range(1, self.attn_layer):
-                self.beta[i] = self.attention_layer_variables[
-                    "attention_layer_{}{}/layer_normalization_{}/beta".format(
-                        i, suffix, i
-                    )
-                ]
-                self.gamma[i] = self.attention_layer_variables[
-                    "attention_layer_{}{}/layer_normalization_{}/gamma".format(
-                        i, suffix, i
-                    )
-                ]
+        # self.attention_layer_variables = get_attention_layer_variables_from_graph_def(
+        #     graph_def, suffix=suffix
+        # )
+        # if self.attn_layer > 0:
+        #     self.beta[0] = self.attention_layer_variables[
+        #         "attention_layer_0{}/layer_normalization/beta".format(suffix)
+        #     ]
+        #     self.gamma[0] = self.attention_layer_variables[
+        #         "attention_layer_0{}/layer_normalization/gamma".format(suffix)
+        #     ]
+        #     for i in range(1, self.attn_layer):
+        #         self.beta[i] = self.attention_layer_variables[
+        #             "attention_layer_{}{}/layer_normalization_{}/beta".format(
+        #                 i, suffix, i
+        #             )
+        #         ]
+        #         self.gamma[i] = self.attention_layer_variables[
+        #             "attention_layer_{}{}/layer_normalization_{}/gamma".format(
+        #                 i, suffix, i
+        #             )
+        #         ]

@@ -71,6 +71,7 @@ setup(
         "deepmd",
         "deepmd/descriptor",
         "deepmd/fit",
+        "deepmd/backbone",
         "deepmd/infer",
         "deepmd/loss",
         "deepmd/utils",

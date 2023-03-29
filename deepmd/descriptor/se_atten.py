@@ -57,6 +57,7 @@ from .se_a import (
     DescrptSeA,
 )
 
+from IPython import embed
 
 @Descriptor.register("se_atten")
 class DescrptSeAtten(DescrptSeA):

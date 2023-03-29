@@ -365,7 +365,7 @@ def descrpt_se_atten_args():
             "exclude_types", list, optional=True, default=[], doc=doc_exclude_types
         ),
         Argument(
-            "set_davg_zero", bool, optional=True, default=False, doc=doc_set_davg_zero
+            "set_davg_zero", bool, optional=True, default=True, doc=doc_set_davg_zero
         ),
         Argument("attn", int, optional=True, default=128, doc=doc_attn),
         Argument("attn_layer", int, optional=True, default=2, doc=doc_attn_layer),
@@ -423,20 +423,11 @@ def descrpt_se_a_mask_args():
 
 @descrpt_args_plugin.register("gaussian")
 def descrpt_gaussian_args():
-    doc_sel = 'This parameter set the number of selected neighbors for each type of atom. It can be:\n\n\
-    - `List[int]`. The length of the list should be the same as the number of atom types in the system. `sel[i]` gives the selected number of type-i neighbors. `sel[i]` is recommended to be larger than the maximally possible number of type-i neighbors in the cut-off radius. It is noted that the total sel value must be less than 4096 in a GPU environment.\n\n\
-    - `str`. Can be "auto:factor" or "auto". "factor" is a float number larger than 1. This option will automatically determine the `sel`. In detail it counts the maximal number of neighbors with in the cutoff radius for each type of neighbor, then multiply the maximum by the "factor". Finally the number is wraped up to 4 divisible. The option "auto" is equivalent to "auto:1.1".'
-    doc_rcut = "The cut-off radius."
-    doc_rcut_smth = "Where to start smoothing. For example the 1/r term is smoothed from `rcut` to `rcut_smth`"
     doc_kernel_num = "Number of kernels"
-    doc_precision = f"The precision of the embedding net parameters, supported options are {list_to_doc(PRECISION_DICT.keys())} Default follows the interface precision."
-    doc_trainable = "If the parameters in the embedding net is trainable"
-    doc_seed = "Random seed for parameter initialization"
+    doc_use_D = "use descriptor as atomic"
+    doc_use_G = "use env_mat as pair"
 
-    return [
-        Argument("sel", int, optional=True, default=120, doc=doc_sel),
-        Argument("rcut", float, optional=True, default=6.0, doc=doc_rcut),
-        Argument("rcut_smth", float, optional=True, default=0.5, doc=doc_rcut_smth),
+    return descrpt_se_atten_args() + [
         Argument(
             "kernel_num",
             int,
@@ -444,9 +435,18 @@ def descrpt_gaussian_args():
             default=128,
             doc=doc_kernel_num,
         ),
-        Argument("precision", str, optional=True, default="default", doc=doc_precision),
-        Argument("trainable", bool, optional=True, default=True, doc=doc_trainable),
-        Argument("seed", [int, None], optional=True, doc=doc_seed),
+        Argument(
+            "use_D",
+            bool,
+            optional=True,
+            default=False,
+            doc=doc_use_D),
+        Argument(
+            "use_G",
+            bool,
+            optional=True,
+            default=False,
+            doc=doc_use_G),
     ]
 
 def descrpt_variant_type_args(exclude_hybrid: bool = False) -> Variant:
@@ -1388,6 +1388,7 @@ def training_args():  # ! modified by Ziyao: data configuration isolated.
     doc_same_mask = "Use the same mask in noise and token mask."
     doc_coord_noise_num = "Number of noised atoms."
     doc_masked_token_num = "Number of masked atom tokens."
+    doc_coord_mask_mode = "Mode of noised atoms, supported options are ['nloc_mask_3x3']"
 
     arg_training_data = training_data_args()
     arg_validation_data = validation_data_args()
@@ -1426,6 +1427,9 @@ def training_args():  # ! modified by Ziyao: data configuration isolated.
         ),
         Argument(
             "masked_token_num", int, optional=True, default=10, doc=doc_masked_token_num
+        ),
+        Argument(
+            "coord_mask_mode", str, optional=True, default='', doc=doc_coord_mask_mode
         ),
         Argument(
             "same_mask", bool, optional=True, default=False, doc=doc_same_mask
