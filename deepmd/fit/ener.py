@@ -325,6 +325,31 @@ class EnerFitting(Fitting):
                     self.aparam_std[ii] = protection
             self.aparam_inv_std = 1.0 / self.aparam_std
 
+    def load_stat(self, stat_dict):
+        if self.numb_fparam > 0:
+            self.fparam_avg = stat_dict["fparam_avg"]
+            self.fparam_std = stat_dict["fparam_std"]
+            self.fparam_inv_std = stat_dict["fparam_inv_std"]
+        if self.numb_aparam > 0:
+            self.aparam_avg = stat_dict["aparam_avg"]
+            self.aparam_std = stat_dict["aparam_std"]
+            self.aparam_inv_std = stat_dict["aparam_inv_std"]
+        self.bias_atom_e = stat_dict["bias_atom_e"]
+
+    def save_stat(self):
+        stat_dict = {
+            "bias_atom_e": self.bias_atom_e,
+        }
+        if self.numb_fparam > 0:
+            stat_dict["fparam_avg"] = self.fparam_avg
+            stat_dict["fparam_std"] = self.fparam_std
+            stat_dict["fparam_inv_std"] = self.fparam_inv_std
+        if self.numb_aparam > 0:
+            stat_dict["aparam_avg"] = self.aparam_avg
+            stat_dict["aparam_std"] = self.aparam_std
+            stat_dict["aparam_inv_std"] = self.aparam_inv_std
+        return stat_dict
+
     def _compute_std(self, sumv2, sumv, sumn):
         return np.sqrt(sumv2 / sumn - np.multiply(sumv / sumn, sumv / sumn))
 

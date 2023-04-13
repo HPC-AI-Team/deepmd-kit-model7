@@ -6,6 +6,7 @@ Can handle local or distributed training.
 import json
 import logging
 import time
+import os
 from typing import (
     Any,
     Dict,
@@ -57,6 +58,7 @@ from deepmd.utils.neighbor_stat import (
 from deepmd.utils.path import (
     DPPath,
 )
+import pickle
 
 __all__ = ["train"]
 
@@ -210,6 +212,7 @@ def _do_work(jdata: Dict[str, Any], run_opt: RunOptions, is_compress: bool = Fal
     # decouple the training data from the model compress process
     train_data = None
     valid_data = None
+    saved_data_stat = None
     if not is_compress:
         # init data
         if not multi_task_mode:
@@ -217,6 +220,10 @@ def _do_work(jdata: Dict[str, Any], run_opt: RunOptions, is_compress: bool = Fal
                 jdata["training"]["training_data"], rcut, ipt_type_map, modifier
             )
             train_data.print_summary("training")
+            saved_data_stat = jdata["training"]["training_data"].get("data_stat_file", None)
+            if saved_data_stat is not None and os.path.exists(saved_data_stat):
+                log.info(f"Training will use saved data stat from {saved_data_stat}.")
+                saved_data_stat = pickle.load(open(saved_data_stat, 'rb'))
             if jdata["training"].get("validation_data", None) is not None:
                 valid_data = get_data(
                     jdata["training"]["validation_data"],
@@ -228,6 +235,7 @@ def _do_work(jdata: Dict[str, Any], run_opt: RunOptions, is_compress: bool = Fal
         else:
             train_data = {}
             valid_data = {}
+            saved_data_stat = {}
             for data_systems in jdata["training"]["data_dict"]:
                 if (
                     jdata["training"]["fitting_weight"][data_systems] > 0.0
@@ -242,6 +250,12 @@ def _do_work(jdata: Dict[str, Any], run_opt: RunOptions, is_compress: bool = Fal
                     train_data[data_systems].print_summary(
                         f"training in {data_systems}"
                     )
+                    saved_data_stat_one = jdata["training"]["data_dict"][data_systems]["training_data"].get(
+                        "data_stat_file", None
+                    )
+                    if saved_data_stat_one is not None and os.path.exists(saved_data_stat_one):
+                        saved_data_stat_one = pickle.load(open(saved_data_stat_one, 'rb'))
+                    saved_data_stat[data_systems] = saved_data_stat_one
                     if (
                         jdata["training"]["data_dict"][data_systems].get(
                             "validation_data", None
@@ -270,7 +284,7 @@ def _do_work(jdata: Dict[str, Any], run_opt: RunOptions, is_compress: bool = Fal
         origin_type_map = get_data(
             jdata["training"]["training_data"], rcut, None, modifier
         ).get_type_map()
-    model.build(train_data, stop_batch, origin_type_map=origin_type_map)
+    model.build(train_data, stop_batch, origin_type_map=origin_type_map, saved_data_stat=saved_data_stat)
 
     if not is_compress:
         # train the model with the provided systems in a cyclic way

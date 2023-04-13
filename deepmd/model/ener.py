@@ -1,3 +1,4 @@
+import logging
 from typing import (
     List,
     Optional,
@@ -22,6 +23,8 @@ from .model_stat import (
     make_stat_input,
     merge_sys_stat,
 )
+
+log = logging.getLogger(__name__)
 
 
 class EnerModel(Model):
@@ -100,14 +103,29 @@ class EnerModel(Model):
     def get_type_map(self):
         return self.type_map
 
-    def data_stat(self, data):
-        all_stat = make_stat_input(data, self.data_stat_nbatch, merge_sys=False)
-        m_all_stat = merge_sys_stat(all_stat)
-        self._compute_input_stat(
-            m_all_stat, protection=self.data_stat_protect, mixed_type=data.mixed_type
-        )
-        self._compute_output_stat(all_stat, mixed_type=data.mixed_type)
-        # self.bias_atom_e = data.compute_energy_shift(self.rcond)
+    def data_stat(self, data, saved_data_stat=None):
+        if saved_data_stat is not None and isinstance(saved_data_stat, dict):
+            self.descrpt.load_stat(saved_data_stat["descriptor"])
+            self.fitting.load_stat(saved_data_stat["fitting"])
+            log.info(f"Loaded saved statistics results.")
+        else:
+            all_stat = make_stat_input(data, self.data_stat_nbatch, merge_sys=False)
+            m_all_stat = merge_sys_stat(all_stat)
+            self._compute_input_stat(
+                m_all_stat, protection=self.data_stat_protect, mixed_type=data.mixed_type
+            )
+            self._compute_output_stat(all_stat, mixed_type=data.mixed_type)
+            # self.bias_atom_e = data.compute_energy_shift(self.rcond)
+            # save data stat
+            if saved_data_stat is not None and isinstance(saved_data_stat, str):
+                stat_dict = {"descriptor": self.descrpt.save_stat(), "fitting": self.fitting.save_stat()}
+                try:
+                    import pickle
+                    pickle.dump(stat_dict, open(saved_data_stat, 'wb'))
+                    log.info(f"Saved statistics results to {saved_data_stat}.")
+                except:
+                    log.warning(f"Save to {saved_data_stat} failed! The statistics results will not be saved!")
+
 
     def _compute_input_stat(self, all_stat, protection=1e-2, mixed_type=False):
         if mixed_type:

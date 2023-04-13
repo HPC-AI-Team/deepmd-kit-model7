@@ -57,6 +57,8 @@ class DescrptHybrid(Descriptor):
             assert (
                 self.descrpt_list[ii].get_ntypes() == self.descrpt_list[0].get_ntypes()
             ), f"number of atom types in {ii}th descrptor does not match others"
+        if self.multi_task:
+            self.stat_dict = []
 
     def get_rcut(self) -> float:
         """Returns the cut-off radius."""
@@ -149,6 +151,16 @@ class DescrptHybrid(Descriptor):
                 data_coord, data_box, data_atype, natoms_vec, mesh, input_dict
             )
 
+    def load_stat(self, stat_dict_list):
+        for i, stat_dict in enumerate(stat_dict_list):
+            self.descrpt_list[i].load_stat(stat_dict)
+
+    def save_stat(self):
+        stat_dict_list = []
+        for ii in self.descrpt_list:
+            stat_dict_list.append(ii.save_stat())
+        return stat_dict_list
+
     def merge_input_stats(self, stat_dict):
         """Merge the statisitcs computed from compute_input_stats to obtain the self.davg and self.dstd.
 
@@ -167,8 +179,9 @@ class DescrptHybrid(Descriptor):
             suma2
                     The sum of square of relative coord statisitcs.
         """
-        for ii in self.descrpt_list:
-            ii.merge_input_stats(stat_dict)
+        if self.multi_task:
+            for ii in self.descrpt_list:
+                ii.merge_input_stats(ii.stat_dict)
 
     def build(
         self,

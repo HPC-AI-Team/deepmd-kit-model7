@@ -1,3 +1,4 @@
+import logging
 import json
 from typing import (
     List,
@@ -26,6 +27,8 @@ from .model_stat import (
     make_stat_input,
     merge_sys_stat,
 )
+
+log = logging.getLogger(__name__)
 
 
 class MultiModel(Model):
@@ -114,23 +117,46 @@ class MultiModel(Model):
     def get_type_map(self):
         return self.type_map
 
-    def data_stat(self, data):
+    def data_stat(self, data, saved_data_stat=None):
         for fitting_key in data:
-            all_stat = make_stat_input(
-                data[fitting_key], self.data_stat_nbatch, merge_sys=False
-            )
-            m_all_stat = merge_sys_stat(all_stat)
-            self._compute_input_stat(
-                m_all_stat,
-                protection=self.data_stat_protect,
-                mixed_type=data[fitting_key].mixed_type,
-                fitting_key=fitting_key,
-            )
-            self._compute_output_stat(
-                all_stat,
-                mixed_type=data[fitting_key].mixed_type,
-                fitting_key=fitting_key,
-            )
+            if saved_data_stat is not None \
+                    and isinstance(saved_data_stat, dict) \
+                    and saved_data_stat[fitting_key] is not None \
+                    and isinstance(saved_data_stat[fitting_key], dict):
+                self.descrpt.load_stat(saved_data_stat[fitting_key]["descriptor"])
+                if hasattr(self.fitting_dict[fitting_key], "load_stat"):
+                    self.fitting_dict[fitting_key].load_stat(saved_data_stat[fitting_key]["fitting"])
+                log.info(f"Loaded saved statistics results for {fitting_key}.")
+            else:
+                all_stat = make_stat_input(
+                    data[fitting_key], self.data_stat_nbatch, merge_sys=False
+                )
+                m_all_stat = merge_sys_stat(all_stat)
+                self._compute_input_stat(
+                    m_all_stat,
+                    protection=self.data_stat_protect,
+                    mixed_type=data[fitting_key].mixed_type,
+                    fitting_key=fitting_key,
+                )
+                self._compute_output_stat(
+                    all_stat,
+                    mixed_type=data[fitting_key].mixed_type,
+                    fitting_key=fitting_key,
+                )
+                # save data stat
+                if saved_data_stat is not None \
+                        and isinstance(saved_data_stat, dict) \
+                        and saved_data_stat[fitting_key] is not None \
+                        and isinstance(saved_data_stat[fitting_key], str):
+                    stat_dict = {"descriptor": self.descrpt.save_stat(), "fitting": {}}
+                    if hasattr(self.fitting_dict[fitting_key], "save_stat"):
+                        stat_dict["fitting"] = self.fitting_dict[fitting_key].save_stat()
+                    try:
+                        import pickle
+                        pickle.dump(stat_dict, open(saved_data_stat[fitting_key], 'wb'))
+                        log.info(f"Saved statistics results to {saved_data_stat[fitting_key]}.")
+                    except:
+                        log.warning(f"Save to {saved_data_stat[fitting_key]} failed! The statistics results will not be saved!")
         self.descrpt.merge_input_stats(self.descrpt.stat_dict)
 
     def _compute_input_stat(

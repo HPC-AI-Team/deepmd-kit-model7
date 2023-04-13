@@ -268,15 +268,15 @@ class DescrptSeAtten(DescrptSeA):
                     sumn.append(sysn)
                     sumr2.append(sysr2)
                     suma2.append(sysa2)
+            self.temp_stat_dict = {
+                "sumr": sumr,
+                "suma": suma,
+                "sumn": sumn,
+                "sumr2": sumr2,
+                "suma2": suma2,
+            }
             if not self.multi_task:
-                stat_dict = {
-                    "sumr": sumr,
-                    "suma": suma,
-                    "sumn": sumn,
-                    "sumr2": sumr2,
-                    "suma2": suma2,
-                }
-                self.merge_input_stats(stat_dict)
+                self.merge_input_stats(self.temp_stat_dict)
             else:
                 self.stat_dict["sumr"] += sumr
                 self.stat_dict["suma"] += suma

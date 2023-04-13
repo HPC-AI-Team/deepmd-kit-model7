@@ -174,6 +174,7 @@ class DescrptSeR(DescrptSe):
                 graph=sub_graph, config=default_tf_session_config
             )
         self.multi_task = multi_task
+        self.temp_stat_dict = None
         if multi_task:
             self.stat_dict = {"sumr": [], "sumn": [], "sumr2": []}
 
@@ -235,9 +236,9 @@ class DescrptSeR(DescrptSe):
             sumr.append(sysr)
             sumn.append(sysn)
             sumr2.append(sysr2)
+        self.temp_stat_dict = {"sumr": sumr, "sumn": sumn, "sumr2": sumr2}
         if not self.multi_task:
-            stat_dict = {"sumr": sumr, "sumn": sumn, "sumr2": sumr2}
-            self.merge_input_stats(stat_dict)
+            self.merge_input_stats(self.temp_stat_dict)
         else:
             self.stat_dict["sumr"] += sumr
             self.stat_dict["sumn"] += sumn
@@ -273,6 +274,17 @@ class DescrptSeR(DescrptSe):
         if not self.set_davg_zero:
             self.davg = np.array(all_davg)
         self.dstd = np.array(all_dstd)
+
+    def load_stat(self, stat_dict):
+        if not self.multi_task:
+            self.temp_stat_dict = stat_dict
+            self.merge_input_stats(self.temp_stat_dict)
+        else:
+            for item in stat_dict:
+                self.stat_dict[item] += stat_dict[item]
+
+    def save_stat(self):
+        return self.temp_stat_dict
 
     def enable_compression(
         self,

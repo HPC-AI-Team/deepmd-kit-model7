@@ -213,6 +213,16 @@ class PolarFittingSeA(Fitting):
                     np.diagonal(atom_polar[itype].reshape((3, 3)))
                 )
 
+    def load_stat(self, stat_dict):
+        self.avgeig = stat_dict["avgeig"]
+        self.constant_matrix = stat_dict["constant_matrix"]
+
+    def save_stat(self):
+        return {
+            "avgeig": self.avgeig,
+            "constant_matrix": self.constant_matrix,
+        }
+
     def _build_lower(self, start_index, natoms, inputs, rot_mat, suffix="", reuse=None):
         # cut-out inputs
         inputs_i = tf.slice(

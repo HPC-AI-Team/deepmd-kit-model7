@@ -999,6 +999,9 @@ def training_data_args():  # ! added by Ziyao: new specification style for data 
         "Should be of the same length as `systems`, "
         "specifying the probability of each system."
     )
+    doc_data_stat_file = 'The path to the saved data statistic file. ' \
+                         'If exists, it will use this instead of doing data stating. ' \
+                         'If not, it will do data stating and save the results to this path.'
 
     args = [
         Argument("systems", [list, str], optional=False, default=".", doc=doc_systems),
@@ -1009,6 +1012,13 @@ def training_data_args():  # ! added by Ziyao: new specification style for data 
             optional=True,
             default="auto",
             doc=doc_batch_size,
+        ),
+        Argument(
+            "data_stat_file",
+            str,
+            optional=True,
+            default=None,
+            doc=doc_data_stat_file,
         ),
         Argument(
             "auto_prob",
