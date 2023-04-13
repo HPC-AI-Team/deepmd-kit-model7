@@ -21,6 +21,7 @@ from deepmd.env import (
     GLOBAL_TF_FLOAT_PRECISION,
     TF_VERSION,
     global_cvt_2_tf_float,
+    global_cvt_2_ener_float,
     tf,
 )
 from deepmd.fit.fitting import (
@@ -51,81 +52,13 @@ from deepmd.utils.type_embed import (
     embed_atom_type,
 )
 from IPython import embed
-
 log = logging.getLogger(__name__)
 
 
-class EnerFitting(Fitting):
-    r"""Fitting the energy of the system. The force and the virial can also be trained.
-
-    The potential energy :math:`E` is a fitting network function of the descriptor :math:`\mathcal{D}`:
-
-    .. math::
-        E(\mathcal{D}) = \mathcal{L}^{(n)} \circ \mathcal{L}^{(n-1)}
-        \circ \cdots \circ \mathcal{L}^{(1)} \circ \mathcal{L}^{(0)}
-
-    The first :math:`n` hidden layers :math:`\mathcal{L}^{(0)}, \cdots, \mathcal{L}^{(n-1)}` are given by
-
-    .. math::
-        \mathbf{y}=\mathcal{L}(\mathbf{x};\mathbf{w},\mathbf{b})=
-            \boldsymbol{\phi}(\mathbf{x}^T\mathbf{w}+\mathbf{b})
-
-    where :math:`\mathbf{x} \in \mathbb{R}^{N_1}`$` is the input vector and :math:`\mathbf{y} \in \mathbb{R}^{N_2}`
-    is the output vector. :math:`\mathbf{w} \in \mathbb{R}^{N_1 \times N_2}` and
-    :math:`\mathbf{b} \in \mathbb{R}^{N_2}`$` are weights and biases, respectively,
-    both of which are trainable if `trainable[i]` is `True`. :math:`\boldsymbol{\phi}`
-    is the activation function.
-
-    The output layer :math:`\mathcal{L}^{(n)}` is given by
-
-    .. math::
-        \mathbf{y}=\mathcal{L}^{(n)}(\mathbf{x};\mathbf{w},\mathbf{b})=
-            \mathbf{x}^T\mathbf{w}+\mathbf{b}
-
-    where :math:`\mathbf{x} \in \mathbb{R}^{N_{n-1}}`$` is the input vector and :math:`\mathbf{y} \in \mathbb{R}`
-    is the output scalar. :math:`\mathbf{w} \in \mathbb{R}^{N_{n-1}}` and
-    :math:`\mathbf{b} \in \mathbb{R}`$` are weights and bias, respectively,
-    both of which are trainable if `trainable[n]` is `True`.
-
-    Parameters
-    ----------
-    descrpt
-            The descrptor :math:`\mathcal{D}`
-    neuron
-            Number of neurons :math:`N` in each hidden layer of the fitting net
-    resnet_dt
-            Time-step `dt` in the resnet construction:
-            :math:`y = x + dt * \phi (Wx + b)`
-    numb_fparam
-            Number of frame parameter
-    numb_aparam
-            Number of atomic parameter
-    rcond
-            The condition number for the regression of atomic energy.
-    tot_ener_zero
-            Force the total energy to zero. Useful for the charge fitting.
-    trainable
-            If the weights of fitting net are trainable.
-            Suppose that we have :math:`N_l` hidden layers in the fitting net,
-            this list is of length :math:`N_l + 1`, specifying if the hidden layers and the output layer are trainable.
-    seed
-            Random seed for initializing the network parameters.
-    atom_ener
-            Specifying atomic energy contribution in vacuum. The `set_davg_zero` key in the descrptor should be set.
-    activation_function
-            The activation function :math:`\boldsymbol{\phi}` in the embedding net. Supported options are |ACTIVATION_FN|
-    precision
-            The precision of the embedding net parameters. Supported options are |PRECISION|
-    uniform_seed
-            Only for the purpose of backward compatibility, retrieves the old behavior of using the random seed
-    layer_name : list[Optional[str]], optional
-            The name of the each layer. If two layers, either in the same fitting or different fittings,
-            have the same name, they will share the same neural network parameters.
-    use_aparam_as_mask: bool, optional
-            If True, the atomic parameters will be used as a mask that determines the atom is real/virtual.
-            And the aparam will not be used as the atomic parameters for embedding.
+class AttrFitting(Fitting):
+    r"""
+    Fitting the attribute whether summary or average
     """
-
     def __init__(
         self,
         descrpt: tf.Tensor,
@@ -143,6 +76,7 @@ class EnerFitting(Fitting):
         uniform_seed: bool = False,
         layer_name: Optional[List[Optional[str]]] = None,
         use_aparam_as_mask: bool = False,
+        attribute: str = "sum",
     ) -> None:
         """
         Constructor
@@ -217,6 +151,7 @@ class EnerFitting(Fitting):
             assert (
                 len(self.layer_name) == len(self.n_neuron) + 1
             ), "length of layer_name should be that of n_neuron + 1"
+        self.attribute = attribute
 
     def get_numb_fparam(self) -> int:
         """
@@ -251,13 +186,19 @@ class EnerFitting(Fitting):
 
     def _compute_output_stats(self, all_stat, rcond=1e-3, mixed_type=False):
         data = all_stat["energy"]
+        atom_num = all_stat["natoms_vec"]
         # data[sys_idx][batch_idx][frame_idx]
         sys_ener = []
         for ss in range(len(data)):
             sys_data = []
             for ii in range(len(data[ss])):
                 for jj in range(len(data[ss][ii])):
-                    sys_data.append(data[ss][ii][jj])
+                    if self.attribute == 'sum':
+                        sys_data.append(data[ss][ii][jj])
+                    elif self.attribute == 'mean':
+                        sys_data.append(data[ss][ii][jj] * atom_num[ss][0][0])
+                    else:
+                        raise RuntimeError(f"Unknown attribute {self.attribute}!")
             sys_data = np.concatenate(sys_data)
             sys_ener.append(np.average(sys_data))
         sys_ener = np.array(sys_ener)
@@ -676,7 +617,16 @@ class EnerFitting(Fitting):
             outs = tf.reshape(outs, [-1])
 
         tf.summary.histogram("fitting_net_output", outs)
-        return tf.reshape(outs, [-1])
+        outs = tf.reshape(outs, [-1, natoms[0]])
+        if self.attribute == 'sum':
+            attr_outs = tf.reduce_sum(
+                global_cvt_2_ener_float(outs), axis=1, name="o_attr" + suffix)
+        elif self.attribute == 'mean':
+            attr_outs = tf.reduce_mean(
+                global_cvt_2_ener_float(outs), axis=1, name="o_attr" + suffix)
+        else:
+            raise RuntimeError(f'Unknown attribute type {self.attribute}!')
+        return attr_outs
 
     def init_variables(
         self,

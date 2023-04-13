@@ -99,6 +99,8 @@ __all__ = [
     "EMBEDDING_NET_PATTERN",
     "TYPE_EMBEDDING_PATTERN",
     "ATTENTION_LAYER_PATTERN",
+    "GAUSSIAN_PATTERN",
+    "BACKBONE_PATTERN",
     "REMOVE_SUFFIX_DICT",
     "TF_VERSION",
 ]
@@ -164,6 +166,40 @@ ATTENTION_LAYER_PATTERN = str(
     r"attention_layer_\d+/layer_normalization/gamma|"
     r"attention_layer_\d+/layer_normalization_\d+/beta|"
     r"attention_layer_\d+/layer_normalization_\d+/gamma|"
+)
+
+BACKBONE_PATTERN = str(
+    r"backbone_layer/atomic_trans/matrix|"
+    r"backbone_layer/atomic_trans/bias|"
+    r"backbone_layer/pair_trans/matrix|"
+    r"backbone_layer/pair_trans/bias|"
+    r"evo_layer_\d+/layer_normalization/beta|"
+    r"evo_layer_\d+/layer_normalization/gamma|"
+    r"evo_layer_\d+/layer_normalization_\d+/beta|"
+    r"evo_layer_\d+/layer_normalization_\d+/gamma|"
+    r"evo_layer_\d+/in_attn_layer/matrix|"
+    r"evo_layer_\d+/in_attn_layer/bias|"
+    r"evo_layer_\d+/c_ffn1/matrix|"
+    r"evo_layer_\d+/c_ffn1/bias|"
+    r"evo_layer_\d+/c_ffn2/matrix|"
+    r"evo_layer_\d+/c_ffn2/bias|"
+    r"layer_normalization/beta|"
+    r"layer_normalization/gamma|"
+    r"layer_normalization_\d+/beta|"
+    r"layer_normalization_\d+/gamma|"
+    r"pair2coord_1/matrix|"
+    r"pair2coord_1/bias|"
+    r"pair2coord_2/matrix|"
+    r"pair2coord_2/bias|"
+    r"atom2type_1/matrix|"
+    r"atom2type_1/bias|"
+    r"atom2type_2/matrix|"
+    r"atom2type_2/bias|"
+)
+
+GAUSSIAN_PATTERN = str(
+    r"gaussian/mul|"
+    r"gaussian/bias|"
 )
 
 TRANSFER_PATTERN = (

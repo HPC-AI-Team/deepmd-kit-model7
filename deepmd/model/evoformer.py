@@ -24,6 +24,7 @@ from .model_stat import (
     make_stat_input,
     merge_sys_stat,
 )
+from IPython import embed
 
 
 class EvoformerModel(Model):
@@ -42,14 +43,6 @@ class EvoformerModel(Model):
             Number of frames used for data statistic
     data_stat_protect
             Protect parameter for atomic energy regression
-    use_srtab
-            The table for the short-range pairwise interaction added on top of DP. The table is a text data file with (N_t + 1) * N_t / 2 + 1 columes. The first colume is the distance between atoms. The second to the last columes are energies for pairs of certain types. For example we have two atom types, 0 and 1. The columes from 2nd to 4th are for 0-0, 0-1 and 1-1 correspondingly.
-    smin_alpha
-            The short-range tabulated interaction will be swithed according to the distance of the nearest neighbor. This distance is calculated by softmin. This parameter is the decaying parameter in the softmin. It is only required when `use_srtab` is provided.
-    sw_rmin
-            The lower boundary of the interpolation between short-range tabulated interaction and DP. It is only required when `use_srtab` is provided.
-    sw_rmin
-            The upper boundary of the interpolation between short-range tabulated interaction and DP. It is only required when `use_srtab` is provided.
     """
     model_type = 'evoformer'
 
@@ -58,11 +51,14 @@ class EvoformerModel(Model):
             descrpt,
             backbone,
             typeebd,
+            fitting=None,
+            fitting_type="",
             type_map: List[str] = None,
             data_stat_nbatch: int = 10,
             data_stat_protect: float = 1e-2,
             noise: float = 1.00,
             noise_type: str = 'uniform',
+            ener_style: str = 'residual',
     ) -> None:
         """
         Constructor
@@ -85,6 +81,10 @@ class EvoformerModel(Model):
         self.data_stat_protect = data_stat_protect
         self.noise = float(noise)
         self.noise_type = noise_type
+        if fitting is not None:
+            self.fitting = fitting
+            self.fitting_type = fitting_type
+            self.ener_style = ener_style
 
     def get_rcut(self):
         return self.rcut
@@ -99,7 +99,7 @@ class EvoformerModel(Model):
         all_stat = make_stat_input(data, self.data_stat_nbatch, merge_sys=False)
         m_all_stat = merge_sys_stat(all_stat)
         self._compute_input_stat(m_all_stat, mixed_type=data.mixed_type)
-        # self._compute_output_stat(all_stat, mixed_type=data.mixed_type)
+        self._compute_output_stat(all_stat, mixed_type=data.mixed_type)
         # self.bias_atom_e = data.compute_energy_shift(self.rcond)
 
     def _compute_input_stat(self, all_stat, mixed_type=False):
@@ -121,7 +121,11 @@ class EvoformerModel(Model):
                                              all_stat)
 
     def _compute_output_stat(self, all_stat, mixed_type=False):
-        pass
+        if self.fitting is not None:
+            if mixed_type:
+                self.fitting.compute_output_stats(all_stat, mixed_type=mixed_type)
+            else:
+                self.fitting.compute_output_stats(all_stat)
 
     def build(self,
               coord_,
@@ -170,22 +174,83 @@ class EvoformerModel(Model):
             ckpt_meta=ckpt_meta,
             suffix=suffix,
             reuse=reuse)
+        residual_atom_rep = self.atomic_rep
 
-        self.atomic_rep_out, self.pair_rep_out, self.coord_update, self.logits, self.norm_x, self.norm_delta_pair_rep = self.backbone.build(self.atomic_rep,
-                                                                                                      self.pair_rep,
-                                                                                                      natoms,
-                                                                                                      input_dict,
-                                                                                                      reuse=reuse,
-                                                                                                      suffix=suffix)
+
+
+        self.atomic_rep_out, self.pair_rep_out, self.coord_update, self.logits, \
+        self.norm_x, self.norm_delta_pair_rep, self.transformed_atomic_rep = self.backbone.build(self.atomic_rep,
+                                                                                                  self.pair_rep,
+                                                                                                  natoms,
+                                                                                                  input_dict,
+                                                                                                  reuse=reuse,
+                                                                                                  suffix=suffix)
         self.coord_output = coord + tf.reshape(self.coord_update, [-1, natoms[0] * 3])
-
+        self.coord_output = tf.identity(self.coord_output, name="o_coord_denoised" + suffix)
+        self.logits = tf.identity(self.logits, name="o_token_logits" + suffix)
         model_dict = {}
-        model_dict['coord'] = coord
-        model_dict['coord_output'] = self.coord_output
-        model_dict['atype'] = atype
-        model_dict['logits'] = self.logits
-        model_dict['norm_x'] = self.norm_x
-        model_dict['norm_delta_pair_rep'] = self.norm_delta_pair_rep
+        if self.fitting is None:
+            model_dict['coord'] = coord
+            model_dict['coord_output'] = self.coord_output
+            model_dict['atype'] = atype
+            model_dict['logits'] = self.logits
+            model_dict['norm_x'] = self.norm_x
+            model_dict['norm_delta_pair_rep'] = self.norm_delta_pair_rep
+        else:
+            if self.fitting_type == 'ener':
+                if self.ener_style == 'residual':
+                    self.fitting_input = tf.reshape(residual_atom_rep, [-1, self.backbone.atomic_dim]) + self.transformed_atomic_rep / 10000.
+                elif self.ener_style == 'no_backbone':
+                    self.fitting_input = residual_atom_rep
+                elif self.ener_style == 'atomic_out':
+                    self.fitting_input = self.transformed_atomic_rep
+                else:
+                    raise RuntimeError(f"Unknown ener style : {self.ener_style}!")
+                atom_ener = self.fitting.build(
+                    self.fitting_input, natoms, input_dict, reuse=reuse, suffix=suffix
+                )
+                self.atom_ener = atom_ener
+                energy_raw = atom_ener
+
+                energy_raw = tf.reshape(
+                    energy_raw, [-1, natoms[0]], name="o_atom_energy" + suffix
+                )
+                energy = tf.reduce_sum(
+                    global_cvt_2_ener_float(energy_raw), axis=1, name="o_energy" + suffix
+                )
+
+                force, virial, atom_virial = self.descrpt.prod_force_virial(atom_ener, natoms)
+                force = tf.reshape(force, [-1, 3 * natoms[1]], name="o_force" + suffix)
+                virial = tf.reshape(virial, [-1, 9], name="o_virial" + suffix)
+                atom_virial = tf.reshape(
+                    atom_virial, [-1, 9 * natoms[1]], name="o_atom_virial" + suffix
+                )
+                model_dict["energy"] = energy
+                model_dict["force"] = force
+                model_dict["virial"] = virial
+                model_dict["atom_ener"] = energy_raw
+                model_dict["atom_virial"] = atom_virial
+                model_dict["coord"] = coord
+                model_dict["atype"] = atype
+            elif self.fitting_type == 'attr':
+                if self.ener_style == 'residual':
+                    self.fitting_input = tf.reshape(residual_atom_rep, [-1, self.backbone.atomic_dim]) + self.transformed_atomic_rep / 10000.
+                elif self.ener_style == 'no_backbone':
+                    self.fitting_input = residual_atom_rep
+                elif self.ener_style == 'atomic_out':
+                    self.fitting_input = self.transformed_atomic_rep
+                else:
+                    raise RuntimeError(f"Unknown ener style : {self.ener_style}!")
+                attr_out = self.fitting.build(
+                    self.fitting_input, natoms, input_dict, reuse=reuse, suffix=suffix
+                )
+                self.attr_out = attr_out
+
+                model_dict["attr_out"] = attr_out
+                model_dict["coord"] = coord
+                model_dict["atype"] = atype
+            else:
+                raise RuntimeError(f"Unknown fitting type {self.fitting_type}!")
 
         return model_dict
 

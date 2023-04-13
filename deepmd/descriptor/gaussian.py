@@ -31,7 +31,7 @@ from deepmd.utils.errors import (
     GraphWithoutTensorError,
 )
 from deepmd.utils.graph import (
-    get_attention_layer_variables_from_graph_def,
+    get_gaussian_variables_from_graph_def,
     get_tensor_by_name,
     get_tensor_by_name_from_graph,
     load_graph_def,
@@ -153,6 +153,7 @@ class DescrptGaussian(DescrptSeAtten):
         # affine transformation
         self.mul = np.ones([self.ntypes * (self.ntypes + 1), 1])
         self.bias = np.zeros([self.ntypes * (self.ntypes + 1), 1])
+        self.gaussian_variables = None
         # gaussian kernels
         self.means = None
         self.stds = None
@@ -221,10 +222,14 @@ class DescrptGaussian(DescrptSeAtten):
         descriptor
             The output descriptor
         """
+        davg = self.davg
+        dstd = self.dstd
         self.debug_dict = {}
         with tf.variable_scope("descrpt_attr" + suffix, reuse=reuse):
-            davg = np.zeros([self.ntypes, self.ndescrpt])
-            dstd = np.ones([self.ntypes, self.ndescrpt])
+            if davg is None:
+                davg = np.zeros([self.ntypes, self.ndescrpt])
+            if dstd is None:
+                dstd = np.ones([self.ntypes, self.ndescrpt])
             t_rcut = tf.constant(
                 np.max([self.rcut_r, self.rcut_a]),
                 name="rcut",
@@ -345,7 +350,7 @@ class DescrptGaussian(DescrptSeAtten):
             # val : [0, ntypes * (ntypes + 1) )
             self.edge_type = atype * (self.ntypes + 1) + self.nei_type_vec
 
-            with tf.variable_scope('gaussian', reuse=reuse):
+            with tf.variable_scope('gaussian' + suffix, reuse=reuse):
                 # init affine transformation
                 mul_initializer = tf.constant_initializer(self.mul)
                 self.t_mul = tf.get_variable(
@@ -467,9 +472,11 @@ class DescrptGaussian(DescrptSeAtten):
             The suffix of the scope
         """
         super().init_variables(graph=graph, graph_def=graph_def, suffix=suffix)
-        # self.attention_layer_variables = get_attention_layer_variables_from_graph_def(
-        #     graph_def, suffix=suffix
-        # )
+        self.gaussian_variables = get_gaussian_variables_from_graph_def(
+            graph_def, suffix=suffix
+        )
+        self.mul = self.gaussian_variables['gaussian{}/mul'.format(suffix)]
+        self.bias = self.gaussian_variables['gaussian{}/bias'.format(suffix)]
         # if self.attn_layer > 0:
         #     self.beta[0] = self.attention_layer_variables[
         #         "attention_layer_0{}/layer_normalization/beta".format(suffix)

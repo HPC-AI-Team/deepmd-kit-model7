@@ -41,6 +41,7 @@ from deepmd.fit import (
     DipoleFittingSeA,
     EnerFitting,
     PolarFittingSeA,
+    AttrFitting,
 )
 from deepmd.backbone import (
     EvoformerBackbone,
@@ -50,6 +51,7 @@ from deepmd.loss import (
     EnerStdLoss,
     TensorLoss,
     StruReconLoss,
+    AttrStdLoss,
 )
 from deepmd.model import (
     DipoleModel,
@@ -117,6 +119,7 @@ class DPTrainer(object):
         self.use_backbone = "backbone" in model_param
         self.multi_task_mode = "fitting_net_dict" in model_param
         descrpt_param = j_must_have(model_param, "descriptor")
+        fitting_param = None
         if not self.use_backbone:
             fitting_param = (
                 j_must_have(model_param, "fitting_net")
@@ -126,6 +129,12 @@ class DPTrainer(object):
         else:
             backbone_param = j_must_have(model_param, "backbone")
             self.backbone_param = backbone_param
+            if "fitting_net" in model_param or "fitting_net_dict" in model_param:
+                fitting_param = (
+                    j_must_have(model_param, "fitting_net")
+                    if not self.multi_task_mode
+                    else j_must_have(model_param, "fitting_net_dict")
+                )
         typeebd_param = model_param.get("type_embedding", None)
         self.model_param = model_param
         self.descrpt_param = descrpt_param
@@ -172,6 +181,8 @@ class DPTrainer(object):
                 return DipoleFittingSeA(**params)
             elif fitting_type_ == "polar":
                 return PolarFittingSeA(**params)
+            elif fitting_type_ == "attr":
+                return AttrFitting(**params)
             # elif fitting_type_ == 'global_polar':
             #     if descrpt_type_ == 'se_e2_a':
             #         return GlobalPolarFittingSeA(**params)
@@ -211,6 +222,15 @@ class DPTrainer(object):
             backbone_type = backbone_param.pop("type", "evoformer")
             backbone_param["descrpt"] = self.descrpt
             self.backbone = backbone_init(backbone_type, backbone_param)
+            if fitting_param is not None:
+                if not self.multi_task_mode:
+                    fitting_type = fitting_param.get("type", "ener")
+                    self.fitting_type = fitting_type
+                    fitting_param.pop("type", None)
+                    fitting_param["descrpt"] = self.descrpt
+                    self.fitting = fitting_net_init(fitting_type, descrpt_type, fitting_param)
+            else:
+                self.fitting = None
         # type embedding
         padding = False
         if descrpt_type == "se_atten" or hybrid_with_tebd:
@@ -306,11 +326,14 @@ class DPTrainer(object):
                 self.descrpt,
                 self.backbone,
                 self.typeebd,
+                self.fitting,
+                self.fitting_type,
                 model_param.get("type_map"),
                 model_param.get("data_stat_nbatch", 10),
                 model_param.get("data_stat_protect", 1e-2),
                 model_param.get("noise", 1.00),
                 model_param.get("noise_type", "uniform"),
+                model_param.get("ener_style", "atomic_out"),
             )
 
         # learning rate
@@ -332,7 +355,7 @@ class DPTrainer(object):
 
         # loss
         # infer loss type by fitting_type
-        def loss_init(_loss_param, _fitting_type, _fitting, _lr, _backbone=None):
+        def loss_init(_loss_param, _fitting_type, _fitting, _lr, _backbone=None, ntypes=None):
             if _backbone is None:
                 _loss_type = _loss_param.get("type", "ener")
                 if _fitting_type == "ener":
@@ -382,8 +405,14 @@ class DPTrainer(object):
             else:
                 _loss_type = _loss_param.get("type", "stru_recon")
                 _loss_param.pop("type", None)
-                if _backbone == "stru_recon":
+                if _loss_type == "stru":
+                    _loss_param["ntypes"] = ntypes
                     loss = StruReconLoss(_loss_param)
+                elif _loss_type == "ener":
+                    _loss_param["starter_learning_rate"] = _lr.start_lr()
+                    loss = EnerStdLoss(**_loss_param)
+                elif _loss_type == "attr":
+                    loss = AttrStdLoss(**_loss_param)
                 else:
                     raise RuntimeError("get unknown backbone type when building loss function")
             return loss
@@ -405,8 +434,7 @@ class DPTrainer(object):
                     )
         else:
             loss_param = jdata.get("loss", {})
-            loss_param["ntypes"] = self.model.ntypes
-            self.loss = loss_init(loss_param, "", "", self.lr, "stru_recon")
+            self.loss = loss_init(loss_param, "", "", self.lr, "stru_recon", self.model.ntypes)
 
         # training
         tr_data = jdata["training"]
@@ -424,6 +452,7 @@ class DPTrainer(object):
         self.save_ckpt = tr_data.get("save_ckpt", "model.ckpt")
         self.display_in_training = tr_data.get("disp_training", True)
         self.timing_in_training = tr_data.get("time_training", True)
+        self.mask_mode = ''
         if self.use_backbone:
             self.noise = float(tr_data.get("noise", 1.00))
             self.noise_type = tr_data.get("noise_type", "uniform")
@@ -744,7 +773,10 @@ class DPTrainer(object):
                 var_list=trainable_variables,
                 name="train_step",
             )
-            train_ops = [apply_op] + self._extra_train_ops
+            aa = tf.debugging.assert_all_finite(
+                t=self.l2_l, msg='NAN or infinite in loss'
+            )
+            train_ops = [apply_op, aa] + self._extra_train_ops
             self.train_op = tf.group(*train_ops)
         else:
             self.train_op = {}
@@ -941,23 +973,29 @@ class DPTrainer(object):
                 )
                 tb_train_writer.add_summary(summary, cur_batch)
             else:
-                # descrpt_debug_keys = sorted(list(self.model.descrpt.debug_dict.keys()))
-                # debug_out = run_sess(
-                #     self.sess,
-                #     [self.model.descrpt.debug_dict[item_key] for item_key in descrpt_debug_keys],
-                #     feed_dict=train_feed_dict,
-                #     options=prf_options,
-                #     run_metadata=prf_run_metadata,
-                # )
-                # descrpt_debug_out_dict = {item_key: debug_out[i] for i, item_key in enumerate(descrpt_debug_keys)}
-                # embed()
-                run_sess(
-                    self.sess,
-                    [batch_train_op],
-                    feed_dict=train_feed_dict,
-                    options=prf_options,
-                    run_metadata=prf_run_metadata,
-                )
+                try:
+                    # print('here')
+                    # embed()
+                    # from time import sleep
+                    # sleep(2)
+                    run_sess(
+                        self.sess,
+                        [batch_train_op],
+                        feed_dict=train_feed_dict,
+                        options=prf_options,
+                        run_metadata=prf_run_metadata,
+                    )
+                except:
+                    descrpt_debug_keys = sorted(list(self.model.descrpt.debug_dict.keys()))
+                    debug_out = run_sess(
+                        self.sess,
+                        [self.model.descrpt.debug_dict[item_key] for item_key in descrpt_debug_keys],
+                        feed_dict=train_feed_dict,
+                        options=prf_options,
+                        run_metadata=prf_run_metadata,
+                    )
+                    descrpt_debug_out_dict = {item_key: debug_out[i] for i, item_key in enumerate(descrpt_debug_keys)}
+                    embed()
             if self.timing_in_training:
                 toc = time.time()
             if self.timing_in_training:
@@ -1089,26 +1127,26 @@ class DPTrainer(object):
         for ii in ["natoms_vec", "default_mesh"]:
             feed_dict[self.place_holders[ii]] = batch[ii]
         feed_dict[self.place_holders["is_training"]] = is_training
-        if self.use_backbone:
-            # add noise and mask here
-            clean_coord = feed_dict[self.place_holders["coord"]]
-            feed_dict[self.place_holders["clean_coord"]] = clean_coord
-            clean_type = feed_dict[self.place_holders["type"]]
-            feed_dict[self.place_holders["clean_type"]] = clean_type
-            (
-                feed_dict[self.place_holders["coord"]],
-                feed_dict[self.place_holders["type"]],
-                feed_dict[self.place_holders["noise_mask"]],
-                feed_dict[self.place_holders["token_mask"]],
-             ) = self.add_noise_mask(
-                clean_coord,
-                clean_type,
-                batch,
-                _coord_noise_num=self.coord_noise_num,
-                _masked_token_num=self.masked_token_num,
-                noise_dict=noise_dict,
-                mask_mode=mask_mode,
-            )
+        # if self.use_backbone:
+        #     # add noise and mask here
+        #     clean_coord = feed_dict[self.place_holders["coord"]]
+        #     feed_dict[self.place_holders["clean_coord"]] = clean_coord
+        #     clean_type = feed_dict[self.place_holders["type"]]
+        #     feed_dict[self.place_holders["clean_type"]] = clean_type
+        #     (
+        #         feed_dict[self.place_holders["coord"]],
+        #         feed_dict[self.place_holders["type"]],
+        #         feed_dict[self.place_holders["noise_mask"]],
+        #         feed_dict[self.place_holders["token_mask"]],
+        #      ) = self.add_noise_mask(
+        #         clean_coord,
+        #         clean_type,
+        #         batch,
+        #         _coord_noise_num=self.coord_noise_num,
+        #         _masked_token_num=self.masked_token_num,
+        #         noise_dict=noise_dict,
+        #         mask_mode=mask_mode,
+        #     )
         return feed_dict
 
     def add_noise_mask(self, _clean_coord, _clean_type, _batch, _coord_noise_num=10, _masked_token_num=10, noise_dict=None, mask_mode=''):

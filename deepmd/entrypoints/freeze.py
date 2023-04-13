@@ -39,6 +39,8 @@ from deepmd.utils.sess import (
     run_sess,
 )
 
+from IPython import embed
+
 __all__ = ["freeze"]
 
 log = logging.getLogger(__name__)
@@ -259,6 +261,11 @@ def _make_node_names(
         assert (
             node_names is not None
         ), "node_names must be defined in multi-task united model! "
+    elif model_type == "evoformer":
+        nodes += [
+            "o_coord_denoised",
+            "o_token_logits",
+        ]
     else:
         raise RuntimeError(f"unknown model type {model_type}")
     if modifier_type == "dipole_charge":

@@ -24,6 +24,12 @@ from deepmd.env import (
     global_cvt_2_tf_float,
     tf,
 )
+from deepmd.utils.graph import (
+    get_backbone_variables_from_graph_def,
+    get_tensor_by_name,
+    get_tensor_by_name_from_graph,
+    load_graph_def,
+)
 from deepmd.backbone.backbone import (
     Backbone,
 )
@@ -47,6 +53,7 @@ from deepmd.utils.type_embed import (
 
 log = logging.getLogger(__name__)
 
+from IPython import embed
 
 class EvoformerBackbone (Backbone):
     def __init__(self,
@@ -160,6 +167,7 @@ class EvoformerBackbone (Backbone):
         with tf.variable_scope(name, reuse=reuse):
             atomic_rep = one_layer(
                         inputs * 10000,
+                        # inputs,
                         self.feature_dim,
                         name='atomic_trans',
                         scope=name + '/',
@@ -170,14 +178,13 @@ class EvoformerBackbone (Backbone):
                         trainable=self.trainable,
                         uniform_seed=self.uniform_seed,
                         initial_variables=self.backbone_variables)  # (nframes x nloc) x d
-            if self.emb_layer_norm:
-                from IPython import embed
-                embed()
-                atomic_rep = tf.keras.layers.LayerNormalization(
-                    beta_initializer=tf.constant_initializer(self.beta[self.evo_layer * 2 + extra_layer_norm]),
-                    gamma_initializer=tf.constant_initializer(self.gamma[self.evo_layer * 2 + extra_layer_norm]),
-                )(atomic_rep)
-                extra_layer_norm += 1
+        if self.emb_layer_norm:
+            atomic_rep = tf.keras.layers.LayerNormalization(
+                beta_initializer=tf.constant_initializer(self.beta[self.evo_layer * 2 + extra_layer_norm]),
+                gamma_initializer=tf.constant_initializer(self.gamma[self.evo_layer * 2 + extra_layer_norm]),
+                trainable=self.trainable,
+            )(atomic_rep)
+            extra_layer_norm += 1
 
             # atomic_rep = tf.nn.dropout(atomic_rep, p=self.emb_dropout, training=self.training)
 
@@ -250,6 +257,7 @@ class EvoformerBackbone (Backbone):
             atomic_rep = tf.keras.layers.LayerNormalization(
                 beta_initializer=tf.constant_initializer(self.beta[self.evo_layer * 2 + extra_layer_norm]),
                 gamma_initializer=tf.constant_initializer(self.gamma[self.evo_layer * 2 + extra_layer_norm]),
+                trainable=self.trainable,
             )(atomic_rep)
             extra_layer_norm += 1
 
@@ -282,6 +290,7 @@ class EvoformerBackbone (Backbone):
             delta_pair_rep = tf.keras.layers.LayerNormalization(
                 beta_initializer=tf.constant_initializer(self.beta_head[extra_head_layer_norm]),
                 gamma_initializer=tf.constant_initializer(self.gamma_head[extra_head_layer_norm]),
+                trainable=self.trainable,
             )(delta_pair_rep)
             extra_head_layer_norm += 1
 
@@ -295,7 +304,7 @@ class EvoformerBackbone (Backbone):
         attn_probs = one_layer(
             delta_pair_rep,
             self.attn_head,
-            name="pair2coord_1",
+            name="pair2coord_1"+suffix,
             reuse=reuse,
             seed=self.seed,
             activation_fn=self.activation_function,
@@ -308,7 +317,7 @@ class EvoformerBackbone (Backbone):
         attn_probs = one_layer(
             attn_probs,
             1,
-            name="pair2coord_2",
+            name="pair2coord_2"+suffix,
             reuse=reuse,
             seed=self.seed,
             activation_fn=None,
@@ -341,7 +350,7 @@ class EvoformerBackbone (Backbone):
         type_predict = one_layer(
             atomic_rep,
             self.feature_dim,
-            name="atom2type_1",
+            name="atom2type_1"+suffix,
             reuse=reuse,
             seed=self.seed,
             activation_fn=self.activation_function,
@@ -353,12 +362,13 @@ class EvoformerBackbone (Backbone):
         type_predict = tf.keras.layers.LayerNormalization(
             beta_initializer=tf.constant_initializer(self.beta[self.evo_layer * 2 + extra_layer_norm]),
             gamma_initializer=tf.constant_initializer(self.gamma[self.evo_layer * 2 + extra_layer_norm]),
+            trainable=self.trainable,
         )(type_predict)
         extra_layer_norm += 1
         logits = one_layer(
             type_predict,
             self.ntypes - 1,
-            name="atom2type_2",
+            name="atom2type_2"+suffix,
             reuse=reuse,
             seed=self.seed,
             activation_fn=None,
@@ -367,7 +377,19 @@ class EvoformerBackbone (Backbone):
             uniform_seed=self.uniform_seed,
             initial_variables=self.backbone_variables,
         )
-        return atomic_rep, pair_rep, coord_update, logits, norm_x, norm_delta_pair_rep
+        transformed_atomic_rep = one_layer(
+            atomic_rep,
+            self.atomic_dim,
+            name="atom2D"+suffix,
+            reuse=reuse,
+            seed=self.seed,
+            activation_fn=None,
+            precision=self.backbone_precision,
+            trainable=self.trainable,
+            uniform_seed=self.uniform_seed,
+            initial_variables=None,  ## TODO
+        )
+        return atomic_rep, pair_rep, coord_update, logits, norm_x, norm_delta_pair_rep, transformed_atomic_rep
 
     def evoformer_encoder(self, x, nlist, nframes, nloc, nnei, layer=0, attn_bias=None, return_attn=False, scope="", reuse=None):
         residual = x
@@ -375,6 +397,7 @@ class EvoformerBackbone (Backbone):
             x = tf.keras.layers.LayerNormalization(
                 beta_initializer=tf.constant_initializer(self.beta[layer * 2]),
                 gamma_initializer=tf.constant_initializer(self.gamma[layer * 2]),
+                trainable=self.trainable,
             )(x)
         x = self.LocalSelfMultiheadAttention(
             query=x,
@@ -395,6 +418,7 @@ class EvoformerBackbone (Backbone):
             x = tf.keras.layers.LayerNormalization(
                 beta_initializer=tf.constant_initializer(self.beta[layer * 2]),
                 gamma_initializer=tf.constant_initializer(self.gamma[layer * 2]),
+                trainable=self.trainable,
             )(x)
 
         residual = x
@@ -402,6 +426,7 @@ class EvoformerBackbone (Backbone):
             x = tf.keras.layers.LayerNormalization(
                 beta_initializer=tf.constant_initializer(self.beta[layer * 2 + 1]),
                 gamma_initializer=tf.constant_initializer(self.gamma[layer * 2 + 1]),
+                trainable=self.trainable,
             )(x)
         x = self._feedforward(x, d_in=self.feature_dim, d_mid=self.ffn_dim, scope=scope, reuse=reuse)
         # tf.nn.dropout
@@ -410,6 +435,7 @@ class EvoformerBackbone (Backbone):
             x = tf.keras.layers.LayerNormalization(
                 beta_initializer=tf.constant_initializer(self.beta[layer * 2 + 1]),
                 gamma_initializer=tf.constant_initializer(self.gamma[layer * 2 + 1]),
+                trainable=self.trainable,
             )(x)
         if not return_attn:
             return x
@@ -594,10 +620,54 @@ class EvoformerBackbone (Backbone):
             tf.reduce_sum(mask * value, axis=axis) / (eps + tf.reduce_sum(mask, axis=axis))
         )
 
+    def init_variables(self,
+                       graph: tf.Graph,
+                       graph_def: tf.GraphDef,
+                       suffix: str = "",
+                       ) -> None:
+        self.backbone_variables = get_backbone_variables_from_graph_def(
+            graph_def, suffix=suffix
+        )
+        layer_norm_num = 2 * self.evo_layer
+        if self.emb_layer_norm:
+            layer_norm_num += 1
+        if self.final_layer_norm:
+            layer_norm_num += 1
+        # type_predict
+        layer_norm_num += 1
 
-
-
-
-
-
-
+        head_layer_norm_num = 0
+        if self.final_head_layer_norm:
+            head_layer_norm_num += 1
+        idx_var = 0
+        idx_list = 0
+        if self.emb_layer_norm:
+            var_key = "layer_normalization" if idx_var == 0 else "layer_normalization_{}".format(idx_var)
+            self.beta[idx_list] = self.backbone_variables["{}/beta".format(var_key)]
+            self.gamma[idx_list] = self.backbone_variables["{}/gamma".format(var_key)]
+            idx_var += 1
+            idx_list += 1
+        for layer_idx in range(self.evo_layer):
+            for _ in range(2):
+                var_key = "layer_normalization" if idx_var == 0 else "layer_normalization_{}".format(idx_var)
+                self.beta[idx_list] = self.backbone_variables["evo_layer_{}{}/{}/beta".format(layer_idx, suffix, var_key)]
+                self.gamma[idx_list] = self.backbone_variables["evo_layer_{}{}/{}/gamma".format(layer_idx, suffix, var_key)]
+                idx_var += 1
+                idx_list += 1
+        if self.final_layer_norm:
+            var_key = "layer_normalization" if idx_var == 0 else "layer_normalization_{}".format(idx_var)
+            self.beta[idx_list] = self.backbone_variables["{}/beta".format(var_key)]
+            self.gamma[idx_list] = self.backbone_variables["{}/gamma".format(var_key)]
+            idx_var += 1
+            idx_list += 1
+        if self.final_head_layer_norm:
+            var_key = "layer_normalization" if idx_var == 0 else "layer_normalization_{}".format(idx_var)
+            self.beta_head[0] = self.backbone_variables["{}/beta".format(var_key)]
+            self.gamma_head[0] = self.backbone_variables["{}/gamma".format(var_key)]
+            idx_var += 1
+        # type_predict
+        var_key = "layer_normalization" if idx_var == 0 else "layer_normalization_{}".format(idx_var)
+        self.beta[idx_list] = self.backbone_variables["{}/beta".format(var_key)]
+        self.gamma[idx_list] = self.backbone_variables["{}/gamma".format(var_key)]
+        idx_var += 1
+        idx_list += 1

@@ -8,3 +8,6 @@ from .tensor import (
 from .stru import (
     StruReconLoss
 )
+from .attr import (
+    AttrStdLoss
+)

@@ -302,6 +302,12 @@ class DescrptSeAtten(DescrptSeA):
                 self.stat_dict["sumr2"] += sumr2
                 self.stat_dict["suma2"] += suma2
 
+    def get_kernel_num(self) -> int:
+        """
+        Returns the cut-off radius
+        """
+        return self.filter_neuron[-1]
+
     def build(
         self,
         coord_: tf.Tensor,

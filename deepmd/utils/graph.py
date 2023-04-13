@@ -11,8 +11,11 @@ from deepmd.env import (
     EMBEDDING_NET_PATTERN,
     FITTING_NET_PATTERN,
     TYPE_EMBEDDING_PATTERN,
+    BACKBONE_PATTERN,
+    GAUSSIAN_PATTERN,
     tf,
 )
+from IPython import embed
 from deepmd.utils.errors import (
     GraphWithoutTensorError,
 )
@@ -474,6 +477,77 @@ def get_attention_layer_nodes_from_graph_def(
     return attention_layer_nodes
 
 
+def get_backbone_nodes_from_graph_def(
+    graph_def: tf.GraphDef, suffix: str = ""
+) -> Dict:
+    """
+    Get the backbone nodes with the given tf.GraphDef object
+
+    Parameters
+    ----------
+    graph_def
+        The input tf.GraphDef object
+    suffix : str, optional
+        The scope suffix
+
+    Returns
+    -------
+    Dict
+        The attention layer nodes within the given tf.GraphDef object
+    """
+    if suffix != "":
+        backbone_pattern = (
+            BACKBONE_PATTERN.replace("/atomic_trans", suffix + "/atomic_trans")
+            .replace("/pair_trans", suffix + "/pair_trans")
+            .replace("/in_attn_layer", suffix + "/in_attn_layer")
+            .replace("/c_ffn", suffix + "/c_ffn")
+            .replace("pair2coord_1/", "pair2coord_1{}/".format(suffix))
+            .replace("pair2coord_2/", "pair2coord_2{}/".format(suffix))
+            .replace("atom2type_1/", "atom2type_1{}/".format(suffix))
+            .replace("atom2type_2/", "atom2type_2{}/".format(suffix))
+            .replace("/layer_normalization", suffix + "/layer_normalization")
+        )
+    else:
+        backbone_pattern = BACKBONE_PATTERN
+
+    backbone_nodes = get_pattern_nodes_from_graph_def(
+        graph_def, backbone_pattern
+    )
+    return backbone_nodes
+
+
+def get_gaussian_nodes_from_graph_def(
+    graph_def: tf.GraphDef, suffix: str = ""
+) -> Dict:
+    """
+    Get the gaussian nodes with the given tf.GraphDef object
+
+    Parameters
+    ----------
+    graph_def
+        The input tf.GraphDef object
+    suffix : str, optional
+        The scope suffix
+
+    Returns
+    -------
+    Dict
+        The attention layer nodes within the given tf.GraphDef object
+    """
+    if suffix != "":
+        gaussian_pattern = (
+            GAUSSIAN_PATTERN.replace("/mul", suffix + "/mul")
+            .replace("/bias", suffix + "/bias")
+        )
+    else:
+        gaussian_pattern = GAUSSIAN_PATTERN
+
+    gaussian_nodes = get_pattern_nodes_from_graph_def(
+        graph_def, gaussian_pattern
+    )
+    return gaussian_nodes
+
+
 def get_attention_layer_variables_from_graph_def(
     graph_def: tf.GraphDef, suffix: str = ""
 ) -> Dict:
@@ -508,3 +582,75 @@ def get_attention_layer_variables_from_graph_def(
             tensor_value = get_tensor_by_type(node, dtype)
         attention_layer_variables[item] = np.reshape(tensor_value, tensor_shape)
     return attention_layer_variables
+
+
+def get_backbone_variables_from_graph_def(
+    graph_def: tf.GraphDef, suffix: str = ""
+) -> Dict:
+    """
+    Get the backbone variables with the given tf.GraphDef object
+
+    Parameters
+    ----------
+    graph_def : tf.GraphDef
+        The input tf.GraphDef object
+    suffix : str, optional
+        The suffix of the scope
+
+    Returns
+    -------
+    Dict
+        The attention layer variables within the given tf.GraphDef object
+    """
+    backbone_variables = {}
+    backbone_net_nodes = get_backbone_nodes_from_graph_def(
+        graph_def, suffix=suffix
+    )
+    for item in backbone_net_nodes:
+        node = backbone_net_nodes[item]
+        dtype = tf.as_dtype(node.dtype).as_numpy_dtype
+        tensor_shape = tf.TensorShape(node.tensor_shape).as_list()
+        if (len(tensor_shape) != 1 and tensor_shape[0] * tensor_shape[1] != 1) or (tensor_shape[0] != 1):
+            tensor_value = np.frombuffer(
+                node.tensor_content, dtype=tf.as_dtype(node.dtype).as_numpy_dtype
+            )
+        else:
+            tensor_value = get_tensor_by_type(node, dtype)
+        backbone_variables[item] = np.reshape(tensor_value, tensor_shape)
+    return backbone_variables
+
+
+def get_gaussian_variables_from_graph_def(
+    graph_def: tf.GraphDef, suffix: str = ""
+) -> Dict:
+    """
+    Get the gaussian variables with the given tf.GraphDef object
+
+    Parameters
+    ----------
+    graph_def : tf.GraphDef
+        The input tf.GraphDef object
+    suffix : str, optional
+        The suffix of the scope
+
+    Returns
+    -------
+    Dict
+        The attention layer variables within the given tf.GraphDef object
+    """
+    gaussian_variables = {}
+    gaussian_net_nodes = get_gaussian_nodes_from_graph_def(
+        graph_def, suffix=suffix
+    )
+    for item in gaussian_net_nodes:
+        node = gaussian_net_nodes[item]
+        dtype = tf.as_dtype(node.dtype).as_numpy_dtype
+        tensor_shape = tf.TensorShape(node.tensor_shape).as_list()
+        if (len(tensor_shape) != 1) or (tensor_shape[0] != 1):
+            tensor_value = np.frombuffer(
+                node.tensor_content, dtype=tf.as_dtype(node.dtype).as_numpy_dtype
+            )
+        else:
+            tensor_value = get_tensor_by_type(node, dtype)
+        gaussian_variables[item] = np.reshape(tensor_value, tensor_shape)
+    return gaussian_variables

@@ -534,6 +534,76 @@ def fitting_ener():
         ),
     ]
 
+def fitting_attr():
+    doc_numb_fparam = "The dimension of the frame parameter. If set to >0, file `fparam.npy` should be included to provided the input fparams."
+    doc_numb_aparam = "The dimension of the atomic parameter. If set to >0, file `aparam.npy` should be included to provided the input aparams."
+    doc_neuron = "The number of neurons in each hidden layers of the fitting net. When two hidden layers are of the same size, a skip connection is built."
+    doc_activation_function = f'The activation function in the fitting net. Supported activation functions are {list_to_doc(ACTIVATION_FN_DICT.keys())} Note that "gelu" denotes the custom operator version, and "gelu_tf" denotes the TF standard version.'
+    doc_precision = f"The precision of the fitting net parameters, supported options are {list_to_doc(PRECISION_DICT.keys())} Default follows the interface precision."
+    doc_resnet_dt = 'Whether to use a "Timestep" in the skip connection'
+    doc_trainable = "Whether the parameters in the fitting net are trainable. This option can be\n\n\
+- bool: True if all parameters of the fitting net are trainable, False otherwise.\n\n\
+- list of bool: Specifies if each layer is trainable. Since the fitting net is composed by hidden layers followed by a output layer, the length of tihs list should be equal to len(`neuron`)+1."
+    doc_rcond = "The condition number used to determine the inital energy shift for each type of atoms."
+    doc_seed = "Random seed for parameter initialization of the fitting net"
+    doc_atom_ener = "Specify the atomic energy in vacuum for each type"
+    doc_layer_name = (
+        "The name of the each layer. The length of this list should be equal to n_neuron + 1. "
+        "If two layers, either in the same fitting or different fittings, "
+        "have the same name, they will share the same neural network parameters. "
+        "The shape of these layers should be the same. "
+        "If null is given for a layer, parameters will not be shared."
+    )
+    doc_use_aparam_as_mask = (
+        "Whether to use the aparam as a mask in input."
+        "If True, the aparam will not be used in fitting net for embedding."
+        "When descrpt is se_a_mask, the aparam will be used as a mask to indicate the input atom is real/virtual. And use_aparam_as_mask should be set to True."
+    )
+    doc_attribute = f"To sum or average the output attribute. {list_to_doc(['sum', 'mean'])}."
+
+    return [
+        Argument("numb_fparam", int, optional=True, default=0, doc=doc_numb_fparam),
+        Argument("numb_aparam", int, optional=True, default=0, doc=doc_numb_aparam),
+        Argument(
+            "neuron",
+            list,
+            optional=True,
+            default=[120, 120, 120],
+            alias=["n_neuron"],
+            doc=doc_neuron,
+        ),
+        Argument(
+            "activation_function",
+            str,
+            optional=True,
+            default="tanh",
+            doc=doc_activation_function,
+        ),
+        Argument("precision", str, optional=True, default="default", doc=doc_precision),
+        Argument("resnet_dt", bool, optional=True, default=True, doc=doc_resnet_dt),
+        Argument(
+            "trainable", [list, bool], optional=True, default=True, doc=doc_trainable
+        ),
+        Argument("rcond", float, optional=True, default=1e-3, doc=doc_rcond),
+        Argument("seed", [int, None], optional=True, doc=doc_seed),
+        Argument("atom_ener", list, optional=True, default=[], doc=doc_atom_ener),
+        Argument("layer_name", list, optional=True, doc=doc_layer_name),
+        Argument(
+            "use_aparam_as_mask",
+            bool,
+            optional=True,
+            default=False,
+            doc=doc_use_aparam_as_mask,
+        ),
+        Argument(
+            "attribute",
+            str,
+            optional=True,
+            default="sum",
+            doc=doc_attribute,
+        ),
+    ]
+
 
 def fitting_polar():
     doc_neuron = "The number of neurons in each hidden layers of the fitting net. When two hidden layers are of the same size, a skip connection is built."
@@ -633,6 +703,7 @@ def fitting_variant_type_args():
         "type",
         [
             Argument("ener", dict, fitting_ener()),
+            Argument("attr", dict, fitting_attr()),
             Argument("dipole", dict, fitting_dipole()),
             Argument("polar", dict, fitting_polar()),
         ],
@@ -827,6 +898,8 @@ def model_args():
     doc_backbone = "The backbone structure to do pretraining."
     doc_noise = "The scale of noise on coord (Angstrom)."
     doc_noise_type = f"The type of added noise on coord, supported options are {list_to_doc(['uniform', 'normal', 'trunc_normal'])}."
+    doc_ener_style = f"The ener model structure. Use atomic rep output or use residual. supported options are {list_to_doc(['residual', 'no_backbone', 'atomic_out'])}"
+    doc_attribute = f"To sum or average the output attribute. {list_to_doc(['sum', 'mean'])}."
     doc_modifier = "The modifier of model output."
     doc_use_srtab = "The table for the short-range pairwise interaction added on top of DP. The table is a text data file with (N_t + 1) * N_t / 2 + 1 columes. The first colume is the distance between atoms. The second to the last columes are energies for pairs of certain types. For example we have two atom types, 0 and 1. The columes from 2nd to 4th are for 0-0, 0-1 and 1-1 correspondingly."
     doc_smin_alpha = "The short-range tabulated interaction will be swithed according to the distance of the nearest neighbor. This distance is calculated by softmin. This parameter is the decaying parameter in the softmin. It is only required when `use_srtab` is provided."
@@ -859,6 +932,20 @@ def model_args():
                 optional=True,
                 default=10,
                 doc=doc_data_bias_nsample,
+            ),
+            Argument(
+                "ener_style",
+                str,
+                optional=True,
+                default="residual",
+                doc=doc_ener_style,
+            ),
+            Argument(
+                "attribute",
+                str,
+                optional=True,
+                default="sum",
+                doc=doc_attribute,
             ),
             Argument("use_srtab", str, optional=True, doc=doc_use_srtab),
             Argument("smin_alpha", float, optional=True, doc=doc_smin_alpha),
@@ -1067,6 +1154,17 @@ def loss_ener():
         ),
     ]
 
+def loss_attr():
+    doc_attribute = f"To sum or average the output attribute. {list_to_doc(['sum', 'mean'])}."
+    return [
+        Argument(
+            "attribute",
+            str,
+            optional=True,
+            default="sum",
+            doc=doc_attribute,
+        ),
+    ]
 
 # YWolfeee: Modified to support tensor type of loss args.
 def loss_tensor():
@@ -1158,6 +1256,7 @@ def loss_variant_type_args():
             Argument("ener", dict, loss_ener()),
             Argument("tensor", dict, loss_tensor()),
             Argument("stru", dict, loss_stru()),
+            Argument("attr", dict, loss_attr()),
             # Argument("polar", dict, loss_tensor()),
             # Argument("global_polar", dict, loss_tensor("global"))
         ],
