@@ -231,6 +231,7 @@ class DPTrainer(object):
                     self.fitting = fitting_net_init(fitting_type, descrpt_type, fitting_param)
             else:
                 self.fitting = None
+                self.fitting_type = None
         # type embedding
         padding = False
         if descrpt_type == "se_atten" or hybrid_with_tebd:
@@ -420,6 +421,7 @@ class DPTrainer(object):
         if not self.use_backbone:
             if not self.multi_task_mode:
                 loss_param = jdata.get("loss", {})
+                self.loss_type = loss_param.get("type", "ener")
                 self.loss = loss_init(loss_param, self.fitting_type, self.fitting, self.lr)
             else:
                 self.loss_dict = {}
@@ -434,6 +436,7 @@ class DPTrainer(object):
                     )
         else:
             loss_param = jdata.get("loss", {})
+            self.loss_type = loss_param.get("type", "stru")
             self.loss = loss_init(loss_param, "", "", self.lr, "stru_recon", self.model.ntypes)
 
         # training
@@ -973,29 +976,46 @@ class DPTrainer(object):
                 )
                 tb_train_writer.add_summary(summary, cur_batch)
             else:
-                try:
-                    # print('here')
-                    # embed()
-                    # from time import sleep
-                    # sleep(2)
-                    run_sess(
-                        self.sess,
-                        [batch_train_op],
-                        feed_dict=train_feed_dict,
-                        options=prf_options,
-                        run_metadata=prf_run_metadata,
-                    )
-                except:
-                    descrpt_debug_keys = sorted(list(self.model.descrpt.debug_dict.keys()))
-                    debug_out = run_sess(
-                        self.sess,
-                        [self.model.descrpt.debug_dict[item_key] for item_key in descrpt_debug_keys],
-                        feed_dict=train_feed_dict,
-                        options=prf_options,
-                        run_metadata=prf_run_metadata,
-                    )
-                    descrpt_debug_out_dict = {item_key: debug_out[i] for i, item_key in enumerate(descrpt_debug_keys)}
-                    embed()
+                # if True:
+                run_sess(
+                    self.sess,
+                    [batch_train_op],
+                    feed_dict=train_feed_dict,
+                    options=prf_options,
+                    run_metadata=prf_run_metadata,
+                )
+                # else:
+                #     backbone_debug_keys = list(self.model.backbone.debug_dict.keys())
+                #     debug_out = run_sess(
+                #         self.sess,
+                #         [self.model.backbone.debug_dict[item_key] for item_key in backbone_debug_keys],
+                #         feed_dict=train_feed_dict,
+                #         options=prf_options,
+                #         run_metadata=prf_run_metadata,
+                #     )
+                #     run_sess(
+                #         self.sess,
+                #         [batch_train_op],
+                #         feed_dict=train_feed_dict,
+                #         options=prf_options,
+                #         run_metadata=prf_run_metadata,
+                #     )
+                #     backbone_debug_out_dict = {item_key: debug_out[i] for i, item_key in enumerate(backbone_debug_keys)}
+                #     backbone_debug_out_dict_mean = {}
+                #     backbone_debug_out_dict_std = {}
+                #     for item_key in backbone_debug_keys:
+                #         if isinstance(backbone_debug_out_dict[item_key], list):
+                #             for layer_num in range(len(backbone_debug_out_dict[item_key])):
+                #                 backbone_debug_out_dict_mean[item_key + '_layer_{}'.format(layer_num)] \
+                #                     = backbone_debug_out_dict[item_key][layer_num].mean()
+                #                 backbone_debug_out_dict_std[item_key + '_layer_{}'.format(layer_num)] \
+                #                     = backbone_debug_out_dict[item_key][layer_num].std()
+                #         else:
+                #             backbone_debug_out_dict_mean[item_key] \
+                #                 = backbone_debug_out_dict[item_key].mean()
+                #             backbone_debug_out_dict_std[item_key] \
+                #                 = backbone_debug_out_dict[item_key].std()
+                #     embed()
             if self.timing_in_training:
                 toc = time.time()
             if self.timing_in_training:
@@ -1127,26 +1147,26 @@ class DPTrainer(object):
         for ii in ["natoms_vec", "default_mesh"]:
             feed_dict[self.place_holders[ii]] = batch[ii]
         feed_dict[self.place_holders["is_training"]] = is_training
-        # if self.use_backbone:
-        #     # add noise and mask here
-        #     clean_coord = feed_dict[self.place_holders["coord"]]
-        #     feed_dict[self.place_holders["clean_coord"]] = clean_coord
-        #     clean_type = feed_dict[self.place_holders["type"]]
-        #     feed_dict[self.place_holders["clean_type"]] = clean_type
-        #     (
-        #         feed_dict[self.place_holders["coord"]],
-        #         feed_dict[self.place_holders["type"]],
-        #         feed_dict[self.place_holders["noise_mask"]],
-        #         feed_dict[self.place_holders["token_mask"]],
-        #      ) = self.add_noise_mask(
-        #         clean_coord,
-        #         clean_type,
-        #         batch,
-        #         _coord_noise_num=self.coord_noise_num,
-        #         _masked_token_num=self.masked_token_num,
-        #         noise_dict=noise_dict,
-        #         mask_mode=mask_mode,
-        #     )
+        if self.use_backbone and self.loss_type == "stru":
+            # add noise and mask here
+            clean_coord = feed_dict[self.place_holders["coord"]]
+            feed_dict[self.place_holders["clean_coord"]] = clean_coord
+            clean_type = feed_dict[self.place_holders["type"]]
+            feed_dict[self.place_holders["clean_type"]] = clean_type
+            (
+                feed_dict[self.place_holders["coord"]],
+                feed_dict[self.place_holders["type"]],
+                feed_dict[self.place_holders["noise_mask"]],
+                feed_dict[self.place_holders["token_mask"]],
+             ) = self.add_noise_mask(
+                clean_coord,
+                clean_type,
+                batch,
+                _coord_noise_num=self.coord_noise_num,
+                _masked_token_num=self.masked_token_num,
+                noise_dict=noise_dict,
+                mask_mode=mask_mode,
+            )
         return feed_dict
 
     def add_noise_mask(self, _clean_coord, _clean_type, _batch, _coord_noise_num=10, _masked_token_num=10, noise_dict=None, mask_mode=''):

@@ -266,6 +266,18 @@ def _make_node_names(
             "o_coord_denoised",
             "o_token_logits",
         ]
+    elif model_type == "evoformer_ener":
+        nodes += [
+            "o_energy",
+            "o_force",
+            "o_virial",
+            "o_atom_energy",
+            "o_atom_virial",
+        ]
+    elif model_type == "evoformer_attr":
+        nodes += [
+            "o_attr",
+        ]
     else:
         raise RuntimeError(f"unknown model type {model_type}")
     if modifier_type == "dipole_charge":

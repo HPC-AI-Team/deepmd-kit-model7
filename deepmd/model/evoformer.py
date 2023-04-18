@@ -52,7 +52,7 @@ class EvoformerModel(Model):
             backbone,
             typeebd,
             fitting=None,
-            fitting_type="",
+            fitting_type=None,
             type_map: List[str] = None,
             data_stat_nbatch: int = 10,
             data_stat_protect: float = 1e-2,
@@ -81,10 +81,9 @@ class EvoformerModel(Model):
         self.data_stat_protect = data_stat_protect
         self.noise = float(noise)
         self.noise_type = noise_type
-        if fitting is not None:
-            self.fitting = fitting
-            self.fitting_type = fitting_type
-            self.ener_style = ener_style
+        self.fitting = fitting
+        self.fitting_type = fitting_type
+        self.ener_style = ener_style
 
     def get_rcut(self):
         return self.rcut
@@ -141,6 +140,13 @@ class EvoformerModel(Model):
 
         if input_dict is None:
             input_dict = {}
+        if self.fitting is not None:
+            if self.fitting_type == 'ener':
+                self.model_type = "evoformer_ener"
+            elif self.fitting_type == 'attr':
+                self.model_type = "evoformer_attr"
+            else:
+                raise RuntimeError(f"Unknown fitting type {self.fitting_type}!")
         with tf.variable_scope('model_attr' + suffix, reuse=reuse):
             t_tmap = tf.constant(' '.join(self.type_map),
                                  name='tmap',
@@ -185,11 +191,11 @@ class EvoformerModel(Model):
                                                                                                   input_dict,
                                                                                                   reuse=reuse,
                                                                                                   suffix=suffix)
-        self.coord_output = coord + tf.reshape(self.coord_update, [-1, natoms[0] * 3])
-        self.coord_output = tf.identity(self.coord_output, name="o_coord_denoised" + suffix)
-        self.logits = tf.identity(self.logits, name="o_token_logits" + suffix)
         model_dict = {}
         if self.fitting is None:
+            self.coord_output = coord + tf.reshape(self.coord_update, [-1, natoms[0] * 3])
+            self.coord_output = tf.identity(self.coord_output, name="o_coord_denoised" + suffix)
+            self.logits = tf.identity(self.logits, name="o_token_logits" + suffix)
             model_dict['coord'] = coord
             model_dict['coord_output'] = self.coord_output
             model_dict['atype'] = atype
@@ -245,6 +251,7 @@ class EvoformerModel(Model):
                     self.fitting_input, natoms, input_dict, reuse=reuse, suffix=suffix
                 )
                 self.attr_out = attr_out
+                attr_out = tf.identity(attr_out, name='o_attr' + suffix)
 
                 model_dict["attr_out"] = attr_out
                 model_dict["coord"] = coord

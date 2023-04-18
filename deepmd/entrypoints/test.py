@@ -132,6 +132,8 @@ def test(
             err = test_polar(
                 dp, data, numb_test, detail_file, atomic=False
             )  # YWolfeee: downward compatibility
+        elif dp.model_type == 'evoformer':
+            err = test_polar(dp, data, numb_test, detail_file, atomic=atomic)
         log.info("# ----------------------------------------------- ")
         err_coll.append(err)
 

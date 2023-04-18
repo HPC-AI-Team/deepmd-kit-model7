@@ -66,6 +66,7 @@ class EvoformerBackbone (Backbone):
                  final_layer_norm: bool = True,
                  final_head_layer_norm: bool = True,
                  emb_layer_norm: bool = True,
+                 smooth_r_power: int = 0,
                  activation_function: str = "gelu",
                  trainable: List[bool] = None,
                  seed: int = None,
@@ -112,6 +113,7 @@ class EvoformerBackbone (Backbone):
         self.trainable = trainable
         self.seed = seed
         self.uniform_seed = uniform_seed
+        self.smooth_r_power = smooth_r_power
         self.seed_shift = one_layer_rand_seed_shift()
 
     def build(self,
@@ -122,6 +124,7 @@ class EvoformerBackbone (Backbone):
               reuse: bool = None,
               suffix: str = '',
               ):
+        self.debug_dict = {}
         type_embedding = input_dict.get('type_embedding', None)  # ntypes x 8
         # tebd_size = type_embedding.shape[-1]
         atype = input_dict.get('atype', None)
@@ -154,6 +157,35 @@ class EvoformerBackbone (Backbone):
         )  # (nframes x h x nloc) x 1 x nnei
 
         self.scaling = tf.cast(self.head_dim, dtype=self.backbone_precision) ** -0.5
+
+        # (nframes x nloc x nnei) x 4
+        self.descrpt = input_dict['descrpt']
+
+        # (nframes x h x nloc) x 1 x nnei
+        self.smooth_R = tf.reshape(
+            tf.tile(
+                tf.reshape(
+                    tf.slice(
+                        tf.reshape(
+                            self.descrpt,
+                            [nframes * nloc * nnei, 4],
+                        ),
+                        [0, 0],
+                        [-1, 1],
+                    ),
+                    [nframes, 1, nloc, nnei],
+                ),
+                [1, self.attn_head, 1, 1],
+            ),
+            [nframes * self.attn_head * nloc, 1, nnei],
+        )
+
+        ###
+        self.debug_dict['inputs'] = inputs
+        self.debug_dict['environ_G'] = environ_G
+        self.debug_dict['scaling'] = self.scaling
+        ###
+
         extra_layer_norm = 0
         extra_head_layer_norm = 0
 
@@ -165,15 +197,15 @@ class EvoformerBackbone (Backbone):
         # )  # (nframes x nloc) x (M1 x M2 + 8)
         name = 'backbone_layer' + suffix
         with tf.variable_scope(name, reuse=reuse):
-            atomic_rep = one_layer(
-                        inputs * 10000,
+            atomic_rep = inputs + one_layer(
+                        inputs,
                         # inputs,
                         self.feature_dim,
                         name='atomic_trans',
                         scope=name + '/',
                         reuse=reuse,
                         seed=self.seed,
-                        activation_fn=None,
+                        # activation_fn=None,
                         precision=self.backbone_precision,
                         trainable=self.trainable,
                         uniform_seed=self.uniform_seed,
@@ -217,8 +249,8 @@ class EvoformerBackbone (Backbone):
         )
         input_pair_rep = pair_rep
         # input_atomic_rep = atomic_rep
-        # pair_rep = pair_rep + self.negative_mask
-        pair_rep = self.mask_fill(pair_rep, self.nmask, -(2 << 32))
+
+        ###
         self.in_atomic_rep = atomic_rep
         self.in_pair_rep = pair_rep
         self.out_layer_q = []
@@ -231,6 +263,10 @@ class EvoformerBackbone (Backbone):
         self.out_layer_pair_rep = []
         self.evo_layer_atomic_rep = []
         self.evo_layer_pair_rep = []
+        ###
+
+        # pair_rep = pair_rep + self.negative_mask
+        pair_rep = self.mask_fill(pair_rep, self.nmask, -(2 << 32))
 
         for i in range(self.evo_layer):
             name_layer = 'evo_layer_{}{}'.format(i, suffix)
@@ -249,10 +285,31 @@ class EvoformerBackbone (Backbone):
                 )
                 self.evo_layer_atomic_rep.append(atomic_rep)
                 self.evo_layer_pair_rep.append(pair_rep)
+
+        ###
+        self.debug_dict['in_atomic_rep'] = self.in_atomic_rep
+        self.debug_dict['in_pair_rep'] = self.in_pair_rep
+        self.debug_dict['out_layer_q'] = self.out_layer_q
+        self.debug_dict['out_layer_k'] = self.out_layer_k
+        self.debug_dict['out_layer_v'] = self.out_layer_v
+        self.debug_dict['out_layer_attn_weights_before'] = self.out_layer_attn_weights_before
+        self.debug_dict['out_layer_attn_weights_after'] = self.out_layer_attn_weights_after
+        self.debug_dict['out_layer_attn_weights_after_softmax'] = self.out_layer_attn_weights_after_softmax
+        self.debug_dict['out_layer_o'] = self.out_layer_o
+        self.debug_dict['out_layer_pair_rep'] = self.out_layer_pair_rep
+        self.debug_dict['evo_layer_atomic_rep'] = self.evo_layer_atomic_rep
+        self.debug_dict['evo_layer_pair_rep'] = self.evo_layer_pair_rep
+        ###
+
         # atomic_rep : (nframes x nloc) x d
         # pair_rep : (nframes x h x nloc) x 1 x nnei
         # TODO norm loss of atomic_rep, no need of mask
         norm_x = tf.reduce_mean(self.norm_loss(atomic_rep))
+
+        ###
+        self.debug_dict['out_atomic_rep_before_ln'] = atomic_rep
+        ###
+
         if self.final_layer_norm:
             atomic_rep = tf.keras.layers.LayerNormalization(
                 beta_initializer=tf.constant_initializer(self.beta[self.evo_layer * 2 + extra_layer_norm]),
@@ -260,6 +317,10 @@ class EvoformerBackbone (Backbone):
                 trainable=self.trainable,
             )(atomic_rep)
             extra_layer_norm += 1
+
+        ###
+        self.debug_dict['out_atomic_rep_after_ln'] = atomic_rep
+        ###
 
         # 1 : use delta_pair_rep
         # (nframes x h x nloc) x 1 x nnei
@@ -286,6 +347,11 @@ class EvoformerBackbone (Backbone):
         norm_delta_pair_rep = tf.reshape(norm_delta_pair_rep, [nframes * nloc, nnei])
         norm_delta_pair_rep = self.masked_mean(self.namsk_nnei, norm_delta_pair_rep)
 
+        ###
+        self.debug_dict['norm_x'] = norm_x
+        self.debug_dict['norm_delta_pair_rep'] = norm_delta_pair_rep
+        ###
+
         if self.final_head_layer_norm:
             delta_pair_rep = tf.keras.layers.LayerNormalization(
                 beta_initializer=tf.constant_initializer(self.beta_head[extra_head_layer_norm]),
@@ -295,6 +361,15 @@ class EvoformerBackbone (Backbone):
             extra_head_layer_norm += 1
 
         self.delta_pair_rep_after_ln = delta_pair_rep
+
+        ###
+        self.debug_dict['out_pair_rep'] = self.out_pair_rep
+        self.debug_dict['out_delta_pair_rep'] = self.out_delta_pair_rep
+        self.debug_dict['out_delta_pair_rep_fill0'] = self.out_delta_pair_rep_fill0
+        self.debug_dict['delta_pair_rep_before_ln'] = self.delta_pair_rep_before_ln
+        self.debug_dict['delta_pair_rep_after_ln'] = self.delta_pair_rep_after_ln
+        ###
+
         # TODO 2 : use delta_G
 
         # encoder_pair_rep[encoder_pair_rep == float("-inf")] = 0 ?
@@ -313,6 +388,11 @@ class EvoformerBackbone (Backbone):
             uniform_seed=self.uniform_seed,
             initial_variables=self.backbone_variables,
         )
+
+        ###
+        self.debug_dict['attn_probs_1'] = attn_probs
+        ###
+
         # (nframes x nloc x nnei) x 1
         attn_probs = one_layer(
             attn_probs,
@@ -359,6 +439,11 @@ class EvoformerBackbone (Backbone):
             uniform_seed=self.uniform_seed,
             initial_variables=self.backbone_variables,
         )
+
+        ###
+        self.debug_dict['type_predict_before_ln'] = type_predict
+        ###
+
         type_predict = tf.keras.layers.LayerNormalization(
             beta_initializer=tf.constant_initializer(self.beta[self.evo_layer * 2 + extra_layer_norm]),
             gamma_initializer=tf.constant_initializer(self.gamma[self.evo_layer * 2 + extra_layer_norm]),
@@ -377,18 +462,27 @@ class EvoformerBackbone (Backbone):
             uniform_seed=self.uniform_seed,
             initial_variables=self.backbone_variables,
         )
-        transformed_atomic_rep = one_layer(
+        transformed_atomic_rep = atomic_rep + one_layer(
             atomic_rep,
             self.atomic_dim,
             name="atom2D"+suffix,
             reuse=reuse,
             seed=self.seed,
-            activation_fn=None,
+            # activation_fn=None,
             precision=self.backbone_precision,
             trainable=self.trainable,
             uniform_seed=self.uniform_seed,
             initial_variables=None,  ## TODO
         )
+
+        ###
+        self.debug_dict['attn_probs_2'] = self.attn_probs
+        self.debug_dict['coord_update'] = coord_update
+        self.debug_dict['type_predict_after_ln'] = type_predict
+        self.debug_dict['logits'] = logits
+        self.debug_dict['transformed_atomic_rep'] = transformed_atomic_rep
+        ###
+
         return atomic_rep, pair_rep, coord_update, logits, norm_x, norm_delta_pair_rep, transformed_atomic_rep
 
     def evoformer_encoder(self, x, nlist, nframes, nloc, nnei, layer=0, attn_bias=None, return_attn=False, scope="", reuse=None):
@@ -552,6 +646,9 @@ class EvoformerBackbone (Backbone):
         # softmax
         # (nframes x h x nloc) x 1 x nnei
         attn = tf.nn.softmax(attn_weights, axis=-1)
+
+        if self.smooth_r_power > 0:
+            attn *= (self.smooth_R ** float(self.smooth_r_power))
         self.out_layer_attn_weights_after_softmax.append(attn)
         # attn = attn_weights
         # (nframes x h x nloc) x 1 x d1

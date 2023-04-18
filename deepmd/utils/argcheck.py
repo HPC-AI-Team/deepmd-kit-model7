@@ -727,6 +727,7 @@ def backbone_evoformer():
     doc_trainable = "Whether the parameters in the backbone are trainable."
     doc_precision = f"The precision of the backbone parameters, supported options are {list_to_doc(PRECISION_DICT.keys())} Default follows the interface precision."
     doc_seed = "Random seed for parameter initialization of the backbone"
+    doc_smooth_r_power = "The power of smooth 1/r in attention weights."
     return [
         Argument(
             "attn_head",
@@ -783,6 +784,13 @@ def backbone_evoformer():
             optional=True,
             default=True,
             doc=doc_emb_layer_norm,
+        ),
+        Argument(
+            "smooth_r_power",
+            int,
+            optional=True,
+            default=0,
+            doc=doc_smooth_r_power,
         ),
         Argument(
             "activation_function",
