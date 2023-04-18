@@ -94,8 +94,8 @@ from deepmd.nvnmd.utils.config import (
     nvnmd_cfg,
 )
 
-import wandb as wb
-from IPython import embed
+# import wandb as wb
+# from IPython import embed
 
 
 def _is_subdir(path, directory):
@@ -471,9 +471,9 @@ class DPTrainer(object):
         self.tensorboard_log_dir = tr_data.get("tensorboard_log_dir", "log")
         self.tensorboard_freq = tr_data.get("tensorboard_freq", 1)
         self.mixed_prec = tr_data.get("mixed_precision", None)
-        name_path = os.path.abspath('.').split('/')
-        wb.init(project="DPA", entity="dp_model_engineering", config=model_param,
-                name=name_path[-2] + '/' + name_path[-1], settings=wb.Settings(start_method="fork"))
+        # name_path = os.path.abspath('.').split('/')
+        # wb.init(project="DPA", entity="dp_model_engineering", config=model_param,
+        #         name=name_path[-2] + '/' + name_path[-1], settings=wb.Settings(start_method="fork"))
         if self.mixed_prec is not None:
             if (
                 self.mixed_prec["compute_prec"] not in ("float16", "bfloat16")
@@ -1263,28 +1263,28 @@ class DPTrainer(object):
     def valid_on_the_fly(self, fp, train_batches, valid_batches, print_header=False):
         train_results = self.get_evaluation_results(train_batches)
         valid_results = self.get_evaluation_results(valid_batches)
-        train_logs = {}
-        valid_logs = {}
-        if not self.multi_task_mode:
-            for k, v in train_results.items():
-                train_logs[k + '_train'] = v
-            wb.log(train_logs, step=self.cur_batch)
-            for k, v in valid_results.items():
-                valid_logs[k + '_valid'] = v
-            wb.log(valid_logs, step=self.cur_batch)
-        else:
-            for item in train_results:
-                for k, v in train_results[item].items():
-                    train_logs[k + '_train'] = v
-            wb.log(train_logs, step=self.cur_batch)
-            for item in valid_results:
-                for k, v in valid_results[item].items():
-                    valid_logs[k + '_valid'] = v
-            wb.log(valid_logs, step=self.cur_batch)
+        # train_logs = {}
+        # valid_logs = {}
+        # if not self.multi_task_mode:
+        #     for k, v in train_results.items():
+        #         train_logs[k + '_train'] = v
+        #     wb.log(train_logs, step=self.cur_batch)
+        #     for k, v in valid_results.items():
+        #         valid_logs[k + '_valid'] = v
+        #     wb.log(valid_logs, step=self.cur_batch)
+        # else:
+        #     for item in train_results:
+        #         for k, v in train_results[item].items():
+        #             train_logs[k + '_train'] = v
+        #     wb.log(train_logs, step=self.cur_batch)
+        #     for item in valid_results:
+        #         for k, v in valid_results[item].items():
+        #             valid_logs[k + '_valid'] = v
+        #     wb.log(valid_logs, step=self.cur_batch)
 
         cur_batch = self.cur_batch
         current_lr = run_sess(self.sess, self.learning_rate)
-        wb.log({'lr': current_lr}, step=self.cur_batch)
+        # wb.log({'lr': current_lr}, step=self.cur_batch)
         if print_header:
             self.print_header(fp, train_results, valid_results, self.multi_task_mode)
         self.print_on_training(
