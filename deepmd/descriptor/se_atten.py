@@ -38,6 +38,7 @@ from .descriptor import (
 from .se_a import (
     DescrptSeA,
 )
+from IPython import embed
 
 
 @Descriptor.register("se_atten")
@@ -162,6 +163,13 @@ class DescrptSeAtten(DescrptSeA):
         self.gamma = np.ones([self.attn_layer, self.filter_neuron[-1]]).astype(
             GLOBAL_NP_FLOAT_PRECISION
         )
+        if self.set_davg_zero:
+            self.beta_d = np.zeros([self.get_dim_out()]).astype(
+                GLOBAL_NP_FLOAT_PRECISION
+            )
+            self.gamma_d = np.ones([self.get_dim_out()]).astype(
+                GLOBAL_NP_FLOAT_PRECISION
+            )
         self.attention_layer_variables = None
         sub_graph = tf.Graph()
         with sub_graph.as_default():
@@ -391,6 +399,14 @@ class DescrptSeAtten(DescrptSeA):
             sel_a=self.sel_all_a,
             sel_r=self.sel_all_r,
         )
+        self.debug_dict['descrpt'] = self.descrpt
+        self.debug_dict['descrpt_deriv'] = self.descrpt_deriv
+        self.debug_dict['rij'] = self.rij
+        self.debug_dict['nlist'] = self.nlist
+        self.debug_dict['nei_type_vec'] = self.nei_type_vec
+        self.debug_dict['nmask'] = self.nmask
+        self.debug_dict['t_avg'] = self.t_avg
+        self.debug_dict['t_std'] = self.t_std
         self.nei_type_vec = tf.reshape(self.nei_type_vec, [-1])
         self.nmask = tf.cast(
             tf.reshape(self.nmask, [-1, 1, self.sel_all_a[0]]),
@@ -401,6 +417,10 @@ class DescrptSeAtten(DescrptSeA):
         tf.summary.histogram("descrpt", self.descrpt)
         tf.summary.histogram("rij", self.rij)
         tf.summary.histogram("nlist", self.nlist)
+        # self.descrpt = tf.reshape(self.descrpt, [-1, 4])
+        # self.descrpt -= tf.reshape(tf.constant([1.0, 0., 0., 0.], dtype=tf.float64), [1, 4]) * tf.reshape((1.0-self.nmask), [-1, 1])
+        # self.descrpt -= tf.reshape(tf.constant([1.0, 0., 0., 0.], dtype=tf.float64), [1, 4])
+        # self.debug_dict['descrpt_nni_minus_1'] = self.descrpt
 
         self.descrpt_reshape = tf.reshape(self.descrpt, [-1, self.ndescrpt])
         # prevent lookup error; the actual atype already used for nlist
@@ -802,7 +822,12 @@ class DescrptSeAtten(DescrptSeA):
         shape_i = inputs_i.get_shape().as_list()
         natom = tf.shape(inputs_i)[0]
         # with (natom x nei_type_i) x 4
+        # inputs_i = tf.reshape(tf.reshape(inputs_i, [-1, 4])/tf.reshape(tf.constant([10.0, 1., 1., 1.], dtype=tf.float64), [1, 4]) , [natom, -1])
         inputs_reshape = tf.reshape(inputs_i, [-1, 4])
+        #
+        # inputs_i = tf.reshape(tf.reshape(inputs_i, [-1, 4]) - tf.reshape(tf.constant([1.0, 0., 0., 0.], dtype=tf.float64), [1, 4]) * tf.reshape(self.nmask,
+        #                                                                                      [-1, 1]), [natom, -1])
+
         # with (natom x nei_type_i) x 1
         xyz_scatter = tf.reshape(tf.slice(inputs_reshape, [0, 0], [-1, 1]), [-1, 1])
         assert atype is not None, "atype must exist!!"
@@ -831,6 +856,7 @@ class DescrptSeAtten(DescrptSeA):
                     initial_variables=self.embedding_net_variables,
                     mixed_prec=self.mixed_prec,
                 )
+                self.debug_dict['xyz_scatter_after_embedding'] = xyz_scatter
                 if (not self.uniform_seed) and (self.seed is not None):
                     self.seed += self.seed_shift
             input_r = tf.slice(
@@ -838,7 +864,7 @@ class DescrptSeAtten(DescrptSeA):
             )
             input_r = tf.nn.l2_normalize(input_r, -1)
             # natom x nei_type_i x out_size
-            xyz_scatter_att = tf.reshape(
+            self.xyz_scatter_att = tf.reshape(
                 self._attention_layers(
                     xyz_scatter,
                     self.attn_layer,
@@ -860,9 +886,10 @@ class DescrptSeAtten(DescrptSeA):
         # but if sel is zero
         # [588 0] -> [147 0 4] incorrect; the correct one is [588 0 4]
         # So we need to explicitly assign the shape to tf.shape(inputs_i)[0] instead of -1
+        self.debug_dict['inputs_i'] = inputs_i
         return tf.matmul(
             tf.reshape(inputs_i, [natom, shape_i[1] // 4, 4]),
-            xyz_scatter_att,
+            self.xyz_scatter_att,
             transpose_a=True,
         )
 
@@ -927,7 +954,11 @@ class DescrptSeAtten(DescrptSeA):
                 ),
                 self.filter_precision,
             )
+        self.debug_dict['xyz_scatter_1_before'] = xyz_scatter_1
+        self.nmask_nnei = tf.reshape(tf.reduce_sum(self.nmask, axis=-1), [-1, 1, 1])
+        self.debug_dict['nmask_nnei'] = self.nmask_nnei
         xyz_scatter_1 = xyz_scatter_1 / nnei
+        self.debug_dict['xyz_scatter_1_after'] = xyz_scatter_1
         # natom x 4 x outputs_size_2
         xyz_scatter_2 = tf.slice(xyz_scatter_1, [0, 0, 0], [-1, -1, outputs_size_2])
         # # natom x 3 x outputs_size_2
@@ -940,6 +971,18 @@ class DescrptSeAtten(DescrptSeA):
         result = tf.matmul(xyz_scatter_1, xyz_scatter_2, transpose_a=True)
         # natom x (outputs_size x outputs_size_2)
         result = tf.reshape(result, [-1, outputs_size_2 * outputs_size[-1]])
+        if self.set_davg_zero:
+            with tf.variable_scope(name + 'out_norm', reuse=reuse):
+                result = tf.keras.layers.BatchNormalization(
+                            momentum=0.999,
+                            epsilon=0.001,
+                            center=False,
+                            scale=False,
+                            # beta_initializer=tf.constant_initializer(self.beta_d),
+                            # gamma_initializer=tf.constant_initializer(self.gamma_d),
+                        )(result) / 10.0
+        self.result_GRRG = result
+        self.debug_dict['result'] = result
 
         return result, qmat
 

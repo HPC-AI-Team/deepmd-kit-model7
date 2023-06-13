@@ -221,6 +221,7 @@ class DescrptSeA(DescrptSe):
         self.mixed_prec = None
         self.place_holders = {}
         self.nei_type = np.repeat(np.arange(self.ntypes), self.sel_a)  # like a mask
+        self.debug_dict = {}
 
         avg_zero = np.zeros([self.ntypes, self.ndescrpt]).astype(
             GLOBAL_NP_FLOAT_PRECISION
@@ -653,6 +654,11 @@ class DescrptSeA(DescrptSe):
             The atomic virial
         """
         [net_deriv] = tf.gradients(atom_ener, self.descrpt_reshape)
+        [G_deriv] = tf.gradients(atom_ener, self.xyz_scatter_att)
+        [GRRG_deriv] = tf.gradients(atom_ener, self.result_GRRG)
+        self.debug_dict['net_deriv'] = net_deriv
+        self.debug_dict['G_deriv'] = G_deriv
+        self.debug_dict['GRRG_deriv'] = GRRG_deriv
         tf.summary.histogram("net_derivative", net_deriv)
         net_deriv_reshape = tf.reshape(
             net_deriv,
@@ -666,6 +672,7 @@ class DescrptSeA(DescrptSe):
             n_a_sel=self.nnei_a,
             n_r_sel=self.nnei_r,
         )
+        self.debug_dict['force'] = force
         virial, atom_virial = op_module.prod_virial_se_a(
             net_deriv_reshape,
             self.descrpt_deriv,
