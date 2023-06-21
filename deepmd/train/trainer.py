@@ -4,6 +4,7 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
 import time
 from typing import (
     Dict,
@@ -658,47 +659,47 @@ class DPTrainer:
                 next_batch_train_op = self.train_op[fitting_key]
                 next_train_batch_op = data_op[fitting_key]
 
-            if self.display_in_training and is_first_step:
-                if self.run_opt.is_chief:
-                    if not self.multi_task_mode:
-                        valid_batches = (
-                            [
-                                valid_data.get_batch()
-                                for ii in range(self.valid_numb_batch)
-                            ]
-                            if valid_data is not None
-                            else None
-                        )
-                        self.valid_on_the_fly(
-                            fp, [train_batch], valid_batches, print_header=True
-                        )
-                    else:
-                        train_batches = {}
-                        valid_batches = {}
-                        # valid_numb_batch_dict
-                        for fitting_key_ii in train_data:
-                            # enumerate fitting key as fitting_key_ii
-                            train_batches[fitting_key_ii] = [
-                                train_data[fitting_key_ii].get_batch()
-                            ]
-                            valid_batches[fitting_key_ii] = (
-                                [
-                                    valid_data[fitting_key_ii].get_batch()
-                                    for ii in range(
-                                        self.valid_numb_batch_dict[fitting_key_ii]
-                                    )
-                                ]
-                                if fitting_key_ii in valid_data
-                                else None
-                            )
-                        self.valid_on_the_fly(
-                            fp,
-                            train_batches,
-                            valid_batches,
-                            print_header=True,
-                            fitting_key=fitting_key,
-                        )
-                is_first_step = False
+            # if self.display_in_training and is_first_step:
+            #     if self.run_opt.is_chief:
+            #         if not self.multi_task_mode:
+            #             valid_batches = (
+            #                 [
+            #                     valid_data.get_batch()
+            #                     for ii in range(self.valid_numb_batch)
+            #                 ]
+            #                 if valid_data is not None
+            #                 else None
+            #             )
+            #             self.valid_on_the_fly(
+            #                 fp, [train_batch], valid_batches, print_header=True
+            #             )
+            #         else:
+            #             train_batches = {}
+            #             valid_batches = {}
+            #             # valid_numb_batch_dict
+            #             for fitting_key_ii in train_data:
+            #                 # enumerate fitting key as fitting_key_ii
+            #                 train_batches[fitting_key_ii] = [
+            #                     train_data[fitting_key_ii].get_batch()
+            #                 ]
+            #                 valid_batches[fitting_key_ii] = (
+            #                     [
+            #                         valid_data[fitting_key_ii].get_batch()
+            #                         for ii in range(
+            #                             self.valid_numb_batch_dict[fitting_key_ii]
+            #                         )
+            #                     ]
+            #                     if fitting_key_ii in valid_data
+            #                     else None
+            #                 )
+            #             self.valid_on_the_fly(
+            #                 fp,
+            #                 train_batches,
+            #                 valid_batches,
+            #                 print_header=True,
+            #                 fitting_key=fitting_key,
+            #             )
+            #     is_first_step = False
 
             if self.timing_in_training:
                 tic = time.time()
@@ -756,13 +757,48 @@ class DPTrainer:
                 #         options=prf_options,
                 #         run_metadata=prf_run_metadata,
                 #     )
-                _, next_train_batch_list = run_sess(
-                    self.sess,
-                    [batch_train_op, next_train_batch_op],
-                    feed_dict=train_feed_dict,
-                    options=prf_options,
-                    run_metadata=prf_run_metadata,
-                )
+                sss = self.model.typeebd.ebd_type
+                t_list = tf.trainable_variables()
+
+                main_ele = 25 # Mo
+                one_ele = 11 # Cr
+                two_ele = 53 # W
+
+                main_ele_2 = 28 # Nb
+                one_ele_2 = 52 # V
+                two_ele_2 = 47 # Ta
+                matr = run_sess(self.sess, t_list[0])
+
+                for iii in range(11):
+                    one_part_ratio = float(iii)/10.0
+                    for jjj in range(11):
+                        one_part_ratio_2 = float(jjj) / 10.0
+                        matr_new = matr.copy()
+                        matr_new[main_ele] = one_part_ratio * matr_new[one_ele] + (1.0-one_part_ratio) * matr_new[two_ele]
+                        matr_new[main_ele_2] = one_part_ratio_2 * matr_new[one_ele_2] + (1.0 - one_part_ratio_2) * matr_new[two_ele_2]
+                        te_check = tf.assign(t_list[0], matr_new)
+                        run_sess(self.sess, te_check)
+                        kk_new = run_sess(self.sess, sss)
+                        assert ((kk_new[main_ele] - (one_part_ratio * kk_new[one_ele] + (1.0-one_part_ratio) * kk_new[two_ele])) < 1e-5).all()
+                        assert ((kk_new[main_ele_2] - (one_part_ratio_2 * kk_new[one_ele_2] + (1.0 - one_part_ratio_2) * kk_new[two_ele_2])) < 1e-5).all()
+                        print(main_ele, one_ele, two_ele, one_part_ratio)
+                        print(main_ele_2, one_ele_2, two_ele_2, one_part_ratio_2)
+                        self.saver.save(self.sess, os.path.join(os.getcwd(), self.save_ckpt), global_step=0)
+                        subprocess.run(f'dp freeze -o Mo_{int(iii)}Cr{10-int(iii)}W_Nb_{int(jjj)}V{10-int(jjj)}Ta.pb', shell=True)
+                        subprocess.run(f'dp test -m Mo_{int(iii)}Cr{10-int(iii)}W_Nb_{int(jjj)}V{10-int(jjj)}Ta.pb '
+                                       f'-n 10 -f /mnt/vepfs/users/zhangduo/data/HEA_inter/sys_dir/all.txt', shell=True)
+                subprocess.run(f'cat stat* > stat_all.txt', shell=True)
+                print('done!')
+                exit()
+                # embed()
+
+                # _, next_train_batch_list = run_sess(
+                #     self.sess,
+                #     [batch_train_op, next_train_batch_op],
+                #     feed_dict=train_feed_dict,
+                #     options=prf_options,
+                #     run_metadata=prf_run_metadata,
+                # )
             if self.timing_in_training:
                 toc = time.time()
             if self.timing_in_training:

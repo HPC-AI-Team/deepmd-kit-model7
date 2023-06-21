@@ -654,11 +654,11 @@ class DescrptSeA(DescrptSe):
             The atomic virial
         """
         [net_deriv] = tf.gradients(atom_ener, self.descrpt_reshape)
-        [G_deriv] = tf.gradients(atom_ener, self.xyz_scatter_att)
-        [GRRG_deriv] = tf.gradients(atom_ener, self.result_GRRG)
-        self.debug_dict['net_deriv'] = net_deriv
-        self.debug_dict['G_deriv'] = G_deriv
-        self.debug_dict['GRRG_deriv'] = GRRG_deriv
+        # [G_deriv] = tf.gradients(atom_ener, self.xyz_scatter_att)
+        # [GRRG_deriv] = tf.gradients(atom_ener, self.result_GRRG)
+        # self.debug_dict['net_deriv'] = net_deriv
+        # self.debug_dict['G_deriv'] = G_deriv
+        # self.debug_dict['GRRG_deriv'] = GRRG_deriv
         tf.summary.histogram("net_derivative", net_deriv)
         net_deriv_reshape = tf.reshape(
             net_deriv,

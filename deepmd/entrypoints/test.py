@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from deepmd.infer.deep_tensor import (
         DeepTensor,
     )
+from IPython import embed
 
 __all__ = ["test"]
 
@@ -105,6 +106,11 @@ def test(
 
     # init model
     dp = DeepPotential(model)
+    result_e = []
+    gt_e = []
+    result_f = []
+    gt_f = []
+    ss = []
 
     for cc, system in enumerate(all_sys):
         log.info("# ---------------output of dp test--------------- ")
@@ -115,7 +121,7 @@ def test(
         data = DeepmdData(system, set_prefix, shuffle_test=shuffle_test, type_map=tmap)
 
         if dp.model_type == "ener":
-            err = test_ener(
+            err, t_e, gt, t_ss, t_f, gt_ff = test_ener(
                 dp,
                 data,
                 system,
@@ -124,6 +130,11 @@ def test(
                 atomic,
                 append_detail=(cc != 0),
             )
+            result_e += t_e
+            gt_e += gt
+            ss += t_ss
+            result_f += t_f
+            gt_f += gt_ff
         elif dp.model_type == "dos":
             err = test_dos(
                 dp,
@@ -149,6 +160,37 @@ def test(
         err_coll.append(err)
 
     avg_err = weighted_average(err_coll)
+    result_e = np.array(result_e)
+    gt_e = np.array(gt_e)
+    result_f = np.array(result_f)
+    gt_f = np.array(gt_f)
+
+    ss = np.array(ss).reshape(-1, 6)
+    bias_diff = (gt_e - result_e)
+    ff = np.linalg.lstsq(ss, bias_diff, rcond=None)
+    pref = ff[0]
+    sss = open(f'./stat_{model}.txt', 'w')
+    ll = []
+    ll.append(model+'\n')
+    msg = 'ELE before: [Ta, Nb, W, Mo, V, Al]'
+    # ll.append(msg+'\n')
+    print(msg)
+    msg = f'delta bias: {pref.reshape(-1)}'
+    # ll.append(msg + '\n')
+    print(msg)
+    unbias_e = result_e + ss @ (pref.reshape(6, 1)).reshape(-1)
+    nn = ss.sum(-1)
+    rmse_ae = (np.sqrt(np.square(unbias_e - gt_e)) / nn).mean()
+    rmse_f = (np.sqrt(np.square(result_f - gt_f))).mean()
+    msg = f'rmse_ae: {rmse_ae} eV/atom'
+    ll.append(msg + '\n')
+    print(msg)
+    msg = f'rmse_f: {rmse_f} eV/A'
+    ll.append(msg + '\n')
+    print(msg)
+    ll.append('\n')
+    sss.writelines(ll)
+    sss.close()
 
     if len(all_sys) != len(err_coll):
         log.warning("Not all systems are tested! Check if the systems are valid")
@@ -308,6 +350,8 @@ def test_ener(
         efield=efield,
         mixed_type=mixed_type,
     )
+    ss = np.tile(np.array([atype[atype == 47].size, atype[atype == 28].size, atype[atype == 53].size,
+                           atype[atype == 25].size, atype[atype == 52].size, atype[atype == 1].size]), (numb_test, 1))
     energy = ret[0]
     force = ret[1]
     virial = ret[2]
@@ -481,7 +525,8 @@ def test_ener(
             "rmse_f": (rmse_f, force.size),
             "rmse_v": (rmse_v, virial.size),
             "rmse_va": (rmse_va, virial.size),
-        }
+        }, energy.reshape(-1).tolist(), test_data["energy"][:numb_test].reshape(-1).tolist(), ss.reshape(-1).tolist(), \
+           force.reshape(-1).tolist(), test_data["force"][:numb_test].reshape(-1).tolist(),
     else:
         return {
             "mae_e": (mae_e, energy.size),
